@@ -1,0 +1,18 @@
+[Unit]
+Description=Sokolniki Podcast Bot
+After=network.target
+
+[Service]
+Type=simple
+User=sokolniki
+WorkingDirectory=/home/sokolniki/sokolniki-podcast-bot/sokolniki_bot
+Environment=BOT_TOKEN=ЗАМЕНИТЕ_НА_СВОЙ_ТОКЕН
+Environment=ADMIN_ID=ЗАМЕНИТЕ_НА_СВОЙ_ID
+ExecStart=/home/sokolniki/venv/bin/python3 app/main.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
