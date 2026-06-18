@@ -7,14 +7,16 @@ class BookingForm(StatesGroup):
     date         = State()
     time         = State()
     hours        = State()
+    phone        = State()
 
 
 class FreeEpisodeForm(StatesGroup):
     name         = State()
+    content_type = State()
+    date         = State()
+    time         = State()
+    hours        = State()
     phone        = State()
-    social_link  = State()
-    occupation   = State()
-    podcast_goal = State()
 
 
 class BroadcastForm(StatesGroup):
@@ -23,12 +25,10 @@ class BroadcastForm(StatesGroup):
     confirm = State()
 
 
-class PaymentForm(StatesGroup):
-    amount = State()
-
-
-class EditContent(StatesGroup):
-    choose_section = State()
-    choose_field   = State()
-    edit_text      = State()
-    edit_photo     = State()
+class AdminAction(StatesGroup):
+    payment_amount   = State()
+    payment_hours    = State()
+    no_pay_reason    = State()
+    reschedule_reason = State()
+    reschedule_date  = State()
+    reschedule_hours = State()
