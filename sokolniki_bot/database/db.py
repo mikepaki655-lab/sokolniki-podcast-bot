@@ -1,13 +1,12 @@
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from database.models import Base, SectionContent
+from database.models import Base, Client, SectionContent
 
 DATABASE_URL = "sqlite+aiosqlite:///sokolniki.db"
 
 engine = create_async_engine(DATABASE_URL, echo=False)
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
-# Tree-style formatting: ├ (U+251C) for middle rows, └ (U+2514) for last row
 DEFAULTS: list[dict] = [
     {
         "key": "welcome",
@@ -28,7 +27,7 @@ DEFAULTS: list[dict] = [
         "local_banner": "banner_record.png",
         "text": (
             "🎬 <b>Запись подкаста</b>\n\n"
-            "Как вас зовут?"
+            "Заполните заявку — мы подтвердим бронирование в течение 30 минут."
         ),
     },
     {
@@ -84,7 +83,27 @@ DEFAULTS: list[dict] = [
 async def init_db() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # Safe migration: add new columns if they don't exist (SQLite)
+        await conn.run_sync(_migrate)
     await _seed_content()
+
+
+def _migrate(conn):
+    """Add new columns to existing tables without dropping data."""
+    import sqlalchemy as sa
+    inspector = sa.inspect(conn)
+    existing = {c["name"] for c in inspector.get_columns("clients")}
+    new_cols = {
+        "booking_date":    "VARCHAR(20)",
+        "booking_time":    "VARCHAR(10)",
+        "booking_hours":   "INTEGER",
+        "status_note":     "TEXT",
+        "reschedule_from": "VARCHAR(50)",
+        "payment_hours":   "FLOAT",
+    }
+    for col, col_type in new_cols.items():
+        if col not in existing:
+            conn.execute(sa.text(f"ALTER TABLE clients ADD COLUMN {col} {col_type}"))
 
 
 async def _seed_content() -> None:
@@ -94,23 +113,6 @@ async def _seed_content() -> None:
                 select(SectionContent).where(SectionContent.key == item["key"])
             )
             if not exists.scalar_one_or_none():
-                session.add(SectionContent(**item))
-        await session.commit()
-
-
-async def reset_content_to_defaults() -> None:
-    """Force-reset all sections to default content (admin command)."""
-    async with async_session() as session:
-        for item in DEFAULTS:
-            result = await session.execute(
-                select(SectionContent).where(SectionContent.key == item["key"])
-            )
-            section = result.scalar_one_or_none()
-            if section:
-                section.text = item["text"]
-                section.local_banner = item["local_banner"]
-                # Keep custom photo_file_id if admin set one
-            else:
                 session.add(SectionContent(**item))
         await session.commit()
 
@@ -151,6 +153,39 @@ async def update_content_photo(key: str, file_id: str) -> None:
             await session.commit()
 
 
-async def get_session() -> AsyncSession:
+async def reset_content_to_defaults() -> None:
     async with async_session() as session:
-        yield session
+        for item in DEFAULTS:
+            result = await session.execute(
+                select(SectionContent).where(SectionContent.key == item["key"])
+            )
+            section = result.scalar_one_or_none()
+            if section:
+                section.text = item["text"]
+                section.local_banner = item["local_banner"]
+            else:
+                session.add(SectionContent(**item))
+        await session.commit()
+
+
+async def get_booked_hours(date_str: str) -> set[int]:
+    """Return set of blocked hour-ints for a date (booking + 1 buffer hour)."""
+    blocked: set[int] = set()
+    async with async_session() as session:
+        result = await session.execute(
+            select(Client).where(
+                Client.booking_date == date_str,
+                Client.status.not_in(["done_paid", "done_no_pay"]),
+                Client.booking_time.isnot(None),
+                Client.booking_hours.isnot(None),
+            )
+        )
+        for client in result.scalars().all():
+            try:
+                start = int(client.booking_time.split(":")[0])
+                duration = client.booking_hours + 1  # +1 buffer
+                for h in range(start, min(start + duration, 24)):
+                    blocked.add(h)
+            except Exception:
+                pass
+    return blocked
