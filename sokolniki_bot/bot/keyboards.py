@@ -1,3 +1,5 @@
+from datetime import date, timedelta
+
 from aiogram.types import (
     InlineKeyboardMarkup,
     KeyboardButton,
@@ -5,6 +7,11 @@ from aiogram.types import (
     ReplyKeyboardRemove,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
+
+# Russian weekday/month abbreviations
+WEEKDAYS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+MONTHS   = ["янв", "фев", "мар", "апр", "май", "июн",
+            "июл", "авг", "сен", "окт", "ноя", "дек"]
 
 
 def main_menu() -> ReplyKeyboardMarkup:
@@ -18,29 +25,54 @@ def main_menu() -> ReplyKeyboardMarkup:
     return builder.as_markup(resize_keyboard=True)
 
 
-def client_type_kb() -> InlineKeyboardMarkup:
+# ─── BOOKING ──────────────────────────────────────────────────────────────────
+
+def content_type_kb() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    for t in ["Предприниматель", "Эксперт", "Блогер", "Компания", "Другое"]:
-        builder.button(text=t, callback_data=f"type:{t}")
-    builder.adjust(2)
+    for label in ["🎙 Подкаст", "🎬 Видео", "📱 Рилс/Шортс", "✏️ Другое"]:
+        builder.button(text=label, callback_data=f"ctype:{label}")
+    builder.button(text="❌ Отмена", callback_data="cancel")
+    builder.adjust(2, 2, 1)
     return builder.as_markup()
 
 
-def service_kb() -> InlineKeyboardMarkup:
+def dates_kb() -> InlineKeyboardMarkup:
+    """Next 14 days as inline buttons, 3 per row."""
     builder = InlineKeyboardBuilder()
-    services = [
-        ("🎙 Только запись", "Только запись"),
-        ("🎬 Запись + монтаж", "Запись + монтаж"),
-        ("📱 Запись + нарезка Reels/Shorts", "Запись + нарезка Reels/Shorts"),
-        ("🚀 Подкаст под ключ", "Подкаст под ключ (запись, монтаж видео, нарезка Reels/Shorts)"),
-        ("🏢 Аренда студии", "Аренда студии"),
-        ("✏️ Свой вариант", "custom"),
-    ]
-    for label, data in services:
-        builder.button(text=label, callback_data=f"service:{data}")
-    builder.adjust(1)
+    today = date.today()
+    for i in range(14):
+        d = today + timedelta(days=i)
+        label = f"{WEEKDAYS[d.weekday()]} {d.day} {MONTHS[d.month - 1]}"
+        value = d.strftime("%d.%m.%Y")
+        builder.button(text=label, callback_data=f"bdate:{value}")
+    builder.button(text="❌ Отмена", callback_data="cancel")
+    builder.adjust(3)
     return builder.as_markup()
 
+
+def times_kb() -> InlineKeyboardMarkup:
+    """Every hour 00:00–23:00, 4 per row."""
+    builder = InlineKeyboardBuilder()
+    for h in range(24):
+        t = f"{h:02d}:00"
+        builder.button(text=t, callback_data=f"btime:{t}")
+    builder.button(text="❌ Отмена", callback_data="cancel")
+    builder.adjust(4)
+    return builder.as_markup()
+
+
+def hours_kb() -> InlineKeyboardMarkup:
+    """1–12 hours, 4 per row."""
+    builder = InlineKeyboardBuilder()
+    for h in range(1, 13):
+        label = f"{h} ч"
+        builder.button(text=label, callback_data=f"bhours:{h}")
+    builder.button(text="❌ Отмена", callback_data="cancel")
+    builder.adjust(4)
+    return builder.as_markup()
+
+
+# ─── MISC ─────────────────────────────────────────────────────────────────────
 
 def prices_kb() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
@@ -68,39 +100,39 @@ def skip_cancel_kb() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-# ─── ADMIN KEYBOARDS ──────────────────────────────────────────────────────────
+# ─── ADMIN ────────────────────────────────────────────────────────────────────
 
 def admin_main_kb() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.button(text="📊 Аналитика", callback_data="admin:analytics")
-    builder.button(text="👥 Клиенты", callback_data="admin:clients")
-    builder.button(text="📨 Рассылка", callback_data="admin:broadcast")
-    builder.button(text="🔥 Лиды", callback_data="admin:leads")
-    builder.button(text="📅 Заявки", callback_data="admin:requests")
-    builder.button(text="💰 Оплаты", callback_data="admin:payments")
-    builder.button(text="📝 Контент", callback_data="admin:content")
+    builder.button(text="📊 Аналитика",  callback_data="admin:analytics")
+    builder.button(text="👥 Клиенты",    callback_data="admin:clients")
+    builder.button(text="📨 Рассылка",   callback_data="admin:broadcast")
+    builder.button(text="🔥 Лиды",       callback_data="admin:leads")
+    builder.button(text="📅 Заявки",     callback_data="admin:requests")
+    builder.button(text="💰 Оплаты",     callback_data="admin:payments")
+    builder.button(text="📝 Контент",    callback_data="admin:content")
     builder.adjust(2)
     return builder.as_markup()
 
 
 def admin_client_actions_kb(client_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.button(text="🟡 Лид", callback_data=f"setstatus:{client_id}:lead")
-    builder.button(text="🔵 Заявка", callback_data=f"setstatus:{client_id}:new_request")
-    builder.button(text="🟢 Оплатил", callback_data=f"setstatus:{client_id}:paid")
-    builder.button(text="✅ Завершён", callback_data=f"setstatus:{client_id}:completed")
-    builder.button(text="◀️ Назад", callback_data="admin:clients")
+    builder.button(text="🟡 Лид",      callback_data=f"setstatus:{client_id}:lead")
+    builder.button(text="🔵 Заявка",   callback_data=f"setstatus:{client_id}:new_request")
+    builder.button(text="🟢 Оплатил",  callback_data=f"setstatus:{client_id}:paid")
+    builder.button(text="✅ Завершён",  callback_data=f"setstatus:{client_id}:completed")
+    builder.button(text="◀️ Назад",    callback_data="admin:clients")
     builder.adjust(2)
     return builder.as_markup()
 
 
 def admin_broadcast_target_kb() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.button(text="🔥 Лиды", callback_data="broadcast_target:lead")
-    builder.button(text="📅 Заявки", callback_data="broadcast_target:new_request")
-    builder.button(text="💰 Оплатившие", callback_data="broadcast_target:paid")
-    builder.button(text="👥 Все клиенты", callback_data="broadcast_target:all")
-    builder.button(text="❌ Отмена", callback_data="admin:cancel_broadcast")
+    builder.button(text="🔥 Лиды",         callback_data="broadcast_target:lead")
+    builder.button(text="📅 Заявки",       callback_data="broadcast_target:new_request")
+    builder.button(text="💰 Оплатившие",   callback_data="broadcast_target:paid")
+    builder.button(text="👥 Все клиенты",  callback_data="broadcast_target:all")
+    builder.button(text="❌ Отмена",       callback_data="admin:cancel_broadcast")
     builder.adjust(2)
     return builder.as_markup()
 
@@ -108,7 +140,7 @@ def admin_broadcast_target_kb() -> InlineKeyboardMarkup:
 def broadcast_confirm_kb() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="✅ Отправить", callback_data="broadcast_confirm:yes")
-    builder.button(text="❌ Отмена", callback_data="broadcast_confirm:no")
+    builder.button(text="❌ Отмена",    callback_data="broadcast_confirm:no")
     builder.adjust(2)
     return builder.as_markup()
 
@@ -131,9 +163,9 @@ def content_sections_kb(sections: list) -> InlineKeyboardMarkup:
 def content_edit_kb(key: str) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="✏️ Изменить текст", callback_data=f"content:edit_text:{key}")
-    builder.button(text="🖼 Изменить фото", callback_data=f"content:edit_photo:{key}")
-    builder.button(text="👁 Предпросмотр", callback_data=f"content:preview:{key}")
-    builder.button(text="◀️ К разделам", callback_data="admin:content")
+    builder.button(text="🖼 Изменить фото",  callback_data=f"content:edit_photo:{key}")
+    builder.button(text="👁 Предпросмотр",   callback_data=f"content:preview:{key}")
+    builder.button(text="◀️ К разделам",     callback_data="admin:content")
     builder.adjust(1)
     return builder.as_markup()
 
