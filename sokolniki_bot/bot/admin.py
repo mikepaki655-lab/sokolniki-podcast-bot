@@ -10,11 +10,11 @@ from sqlalchemy import func, select
 
 from bot.keyboards import (
     admin_bookings_menu, admin_broadcast_menu, admin_main_menu,
-    broadcast_confirm_kb, content_back_to_section_kb, content_edit_kb,
-    content_sections_kb, main_menu, new_booking_actions_kb,
+    analytics_period_kb, broadcast_confirm_kb, content_back_to_section_kb,
+    content_edit_kb, content_sections_kb, main_menu, new_booking_actions_kb,
     processing_booking_actions_kb,
 )
-from bot.states import AdminAction, BroadcastForm
+from bot.states import AdminAction, AnalyticsPeriod, BroadcastForm
 from config import ADMIN_ID
 from database.db import (
     async_session, get_all_content, get_content,
@@ -25,6 +25,7 @@ from database.models import Client
 router = Router()
 logger = logging.getLogger(__name__)
 NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
+MOSCOW_TZ = timezone(timedelta(hours=3))
 
 # Statuses shown in each tab
 NEW_STATUSES        = {"new_request", "lead"}
@@ -352,38 +353,134 @@ async def admin_reschedule_hours(message: Message, state: FSMContext) -> None:
 
 # ─── АНАЛИТИКА ────────────────────────────────────────────────────────────────
 
-@router.message(F.text == "📊 Аналитика")
-async def admin_analytics(message: Message) -> None:
-    if not is_admin(message.from_user.id): return
-
-    now      = datetime.now(timezone.utc)
-    week_ago = now - timedelta(days=7)
-
+async def _compute_analytics(since: datetime, until: datetime) -> dict:
     async with async_session() as session:
-        async def cnt(since, *filters):
+        async def cnt(*filters):
             q = select(func.count()).select_from(Client).where(
-                Client.created_at >= since, *filters)
+                Client.created_at >= since, Client.created_at < until, *filters)
             return (await session.execute(q)).scalar_one()
 
-        async def sum_col(col, since):
+        async def ssum(col):
             q = select(func.sum(col)).where(
-                Client.created_at >= since, col.isnot(None))
+                Client.created_at >= since, Client.created_at < until, col.isnot(None))
             return (await session.execute(q)).scalar_one() or 0
 
-        new_w   = await cnt(week_ago, Client.status.in_(NEW_STATUSES))
-        proc_w  = await cnt(week_ago, Client.status.in_(PROCESSING_STATUSES))
-        done_w  = await cnt(week_ago, Client.status == "done_paid")
-        revenue = await sum_col(Client.payment_amount, week_ago)
-        hours   = await sum_col(Client.payment_hours, week_ago)
+        total    = await cnt()
+        new_cnt  = await cnt(Client.status.in_(NEW_STATUSES))
+        proc_cnt = await cnt(Client.status.in_(PROCESSING_STATUSES))
+        done_cnt = await cnt(Client.status == "done_paid")
+        no_pay   = await cnt(Client.status == "done_no_pay")
+        revenue  = await ssum(Client.payment_amount)
+        hours    = await ssum(Client.payment_hours)
 
+    return dict(total=total, new_cnt=new_cnt, proc_cnt=proc_cnt,
+                done_cnt=done_cnt, no_pay=no_pay, revenue=revenue, hours=hours)
+
+
+def _fmt_analytics(label: str, s: dict) -> str:
+    return (
+        f"📊 <b>Аналитика — {label}</b>\n\n"
+        f"├ 📋 Всего заявок: <b>{s['total']}</b>\n"
+        f"├ 🆕 Новые: <b>{s['new_cnt']}</b>\n"
+        f"├ ⚙️ В обработке: <b>{s['proc_cnt']}</b>\n"
+        f"├ ✅ Завершено с оплатой: <b>{s['done_cnt']}</b>\n"
+        f"├ ❌ Завершено без оплаты: <b>{s['no_pay']}</b>\n"
+        f"├ 💵 Выручка: <b>{s['revenue']:,.0f} ₽</b>\n"
+        f"└ ⏱ Часов (факт): <b>{s['hours']:.1f} ч</b>"
+    )
+
+
+@router.message(F.text == "📊 Аналитика")
+async def admin_analytics(message: Message, state: FSMContext) -> None:
+    if not is_admin(message.from_user.id): return
+    await state.clear()
     await message.answer(
-        "📊 <b>Аналитика за 7 дней</b>\n\n"
-        f"├ 🆕 Новых заявок: <b>{new_w}</b>\n"
-        f"├ ⚙️ В обработке: <b>{proc_w}</b>\n"
-        f"├ ✅ Завершено с оплатой: <b>{done_w}</b>\n"
-        f"├ 💵 Выручка: <b>{revenue:,.0f} ₽</b>\n"
-        f"└ ⏱ Часов забронировано: <b>{hours:.1f} ч</b>",
+        "📊 <b>Аналитика</b>\n└ Выберите период:",
+        parse_mode="HTML",
+        reply_markup=analytics_period_kb(),
+        link_preview_options=NO_PREVIEW)
+
+
+@router.callback_query(F.data.startswith("analytics:"))
+async def analytics_period_cb(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id): await callback.answer("⛔"); return
+    period = callback.data.split(":", 1)[1]
+    now = datetime.now(MOSCOW_TZ)
+
+    if period == "custom":
+        await state.set_state(AnalyticsPeriod.custom_start)
+        await callback.message.answer(
+            "🗓 <b>Задать период</b>\n└ Введите дату начала (например: <code>01.06.2026</code>):",
+            parse_mode="HTML", link_preview_options=NO_PREVIEW)
+        await callback.answer()
+        return
+
+    if period == "week_cur":
+        since = (now - timedelta(days=now.weekday())).replace(
+            hour=0, minute=0, second=0, microsecond=0)
+        label = "текущая неделя"
+    elif period == "week_prev":
+        monday_cur = (now - timedelta(days=now.weekday())).replace(
+            hour=0, minute=0, second=0, microsecond=0)
+        since = monday_cur - timedelta(days=7)
+        now   = monday_cur
+        label = "прошлая неделя"
+    elif period == "month_cur":
+        since = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        label = "текущий месяц"
+    elif period == "month_prev":
+        first_cur = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        last_prev = first_cur - timedelta(days=1)
+        since = last_prev.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        now   = first_cur
+        label = "прошлый месяц"
+    else:
+        await callback.answer(); return
+
+    stats = await _compute_analytics(since, now + timedelta(days=1))
+    await callback.message.answer(
+        _fmt_analytics(label, stats),
+        parse_mode="HTML",
+        reply_markup=analytics_period_kb(),
+        link_preview_options=NO_PREVIEW)
+    await callback.answer()
+
+
+@router.message(AnalyticsPeriod.custom_start)
+async def analytics_custom_start(message: Message, state: FSMContext) -> None:
+    if not is_admin(message.from_user.id): return
+    try:
+        datetime.strptime(message.text.strip(), "%d.%m.%Y")
+    except ValueError:
+        await message.answer("⚠️ Неверный формат. Введите дату как <code>01.06.2026</code>:",
+                             parse_mode="HTML"); return
+    await state.update_data(custom_start=message.text.strip())
+    await state.set_state(AnalyticsPeriod.custom_end)
+    await message.answer(
+        "🗓 Введите дату окончания (например: <code>30.06.2026</code>):",
         parse_mode="HTML", link_preview_options=NO_PREVIEW)
+
+
+@router.message(AnalyticsPeriod.custom_end)
+async def analytics_custom_end(message: Message, state: FSMContext) -> None:
+    if not is_admin(message.from_user.id): return
+    try:
+        end_dt = datetime.strptime(message.text.strip(), "%d.%m.%Y")
+    except ValueError:
+        await message.answer("⚠️ Неверный формат. Введите дату как <code>30.06.2026</code>:",
+                             parse_mode="HTML"); return
+    data = await state.get_data()
+    await state.clear()
+    start_dt = datetime.strptime(data["custom_start"], "%d.%m.%Y")
+    since = start_dt.replace(tzinfo=MOSCOW_TZ)
+    until = end_dt.replace(hour=23, minute=59, second=59, tzinfo=MOSCOW_TZ)
+    label = f"{data['custom_start']} — {message.text.strip()}"
+    stats = await _compute_analytics(since, until)
+    await message.answer(
+        _fmt_analytics(label, stats),
+        parse_mode="HTML",
+        reply_markup=analytics_period_kb(),
+        link_preview_options=NO_PREVIEW)
 
 
 # ─── РАССЫЛКА ─────────────────────────────────────────────────────────────────
