@@ -82,10 +82,21 @@ DEFAULTS: list[dict] = [
 
 async def init_db() -> None:
     async with engine.begin() as conn:
+        await conn.run_sync(_pre_migrate)
         await conn.run_sync(Base.metadata.create_all)
-        # Safe migration: add new columns if they don't exist (SQLite)
         await conn.run_sync(_migrate)
     await _seed_content()
+
+
+def _pre_migrate(conn):
+    """Drop clients table if it has UNIQUE on telegram_id (data reset + schema fix)."""
+    import sqlalchemy as sa
+    result = conn.execute(sa.text(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='clients'"
+    ))
+    row = result.fetchone()
+    if row and row[0] and 'UNIQUE' in row[0].upper():
+        conn.execute(sa.text("DROP TABLE clients"))
 
 
 def _migrate(conn):
