@@ -32,3 +32,8 @@ class AdminAction(StatesGroup):
     reschedule_reason = State()
     reschedule_date  = State()
     reschedule_hours = State()
+
+
+class AnalyticsPeriod(StatesGroup):
+    custom_start = State()
+    custom_end   = State()
