@@ -17,12 +17,11 @@ MONTHS   = ["янв", "фев", "мар", "апр", "май", "июн",
 
 def main_menu() -> ReplyKeyboardMarkup:
     builder = ReplyKeyboardBuilder()
-    builder.row(KeyboardButton(text="🎬 Записать подкаст"))
+    builder.row(KeyboardButton(text="🏠 Забронировать студию"))
     builder.row(
         KeyboardButton(text="💰 Узнать цены"),
         KeyboardButton(text="📍 Адрес студии"),
     )
-    builder.row(KeyboardButton(text="🔥 Первый выпуск бесплатно"))
     return builder.as_markup(resize_keyboard=True)
 
 
@@ -35,6 +34,7 @@ def admin_main_menu() -> ReplyKeyboardMarkup:
         KeyboardButton(text="📨 Рассылка"),
         KeyboardButton(text="📊 Аналитика"),
     )
+    builder.row(KeyboardButton(text="📝 Редактор контента"))
     builder.row(KeyboardButton(text="◀️ Вернуться в бота"))
     return builder.as_markup(resize_keyboard=True)
 
