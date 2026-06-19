@@ -21,7 +21,6 @@ from database.db import (
     reset_content_to_defaults, update_content_photo, update_content_text,
 )
 from database.models import Client
-from bot.states import AdminAction
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -479,6 +478,16 @@ from aiogram.fsm.state import State, StatesGroup
 class EditContentFSM(StatesGroup):
     edit_text  = State()
     edit_photo = State()
+
+
+@router.message(F.text == "📝 Редактор контента")
+async def admin_content_msg(message: Message, state: FSMContext) -> None:
+    if not is_admin(message.from_user.id): return
+    await state.clear()
+    sections = await get_all_content()
+    await message.answer(
+        "📝 <b>Редактор контента</b>\n└ Выберите раздел:",
+        parse_mode="HTML", reply_markup=content_sections_kb(sections))
 
 
 @router.callback_query(F.data == "admin:content")
