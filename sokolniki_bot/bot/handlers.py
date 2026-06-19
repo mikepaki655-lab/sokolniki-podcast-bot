@@ -79,7 +79,7 @@ async def _start_booking(msg: Message, state: FSMContext) -> None:
                      link_preview_options=NO_PREVIEW)
 
 
-@router.message(F.text == "🎬 Записать подкаст")
+@router.message(F.text == "🏠 Забронировать студию")
 async def booking_start_msg(message: Message, state: FSMContext) -> None:
     await _start_booking(message, state)
 
@@ -153,9 +153,25 @@ async def booking_hours(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
 
 
+def _validate_phone(phone: str) -> bool:
+    import re
+    cleaned = re.sub(r"[\s\-\(\)]", "", phone)
+    return bool(re.match(r"^(\+7|7|8)\d{10}$", cleaned))
+
+
 @router.message(BookingForm.phone)
 async def booking_phone(message: Message, state: FSMContext) -> None:
     phone = message.text.strip()
+    if not _validate_phone(phone):
+        await message.answer(
+            "⚠️ <b>Неверный формат номера телефона.</b>\n\n"
+            "Введите номер в одном из форматов:\n"
+            "├ <code>+7 (999) 123-45-67</code>\n"
+            "├ <code>+79991234567</code>\n"
+            "└ <code>89991234567</code>",
+            parse_mode="HTML", reply_markup=cancel_kb(),
+            link_preview_options=NO_PREVIEW)
+        return
     await state.update_data(phone=phone)
     data = await state.get_data()
     await state.clear()
@@ -239,11 +255,6 @@ async def _start_free(msg: Message, state: FSMContext) -> None:
                      link_preview_options=NO_PREVIEW)
 
 
-@router.message(F.text == "🔥 Первый выпуск бесплатно")
-async def show_free_episode(message: Message, state: FSMContext) -> None:
-    await send_section(message, "free", reply_markup=free_episode_kb())
-
-
 @router.callback_query(F.data == "go_free_episode")
 async def start_free_cb(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
@@ -316,6 +327,16 @@ async def free_hours(callback: CallbackQuery, state: FSMContext) -> None:
 @router.message(FreeEpisodeForm.phone)
 async def free_phone(message: Message, state: FSMContext) -> None:
     phone = message.text.strip()
+    if not _validate_phone(phone):
+        await message.answer(
+            "⚠️ <b>Неверный формат номера телефона.</b>\n\n"
+            "Введите номер в одном из форматов:\n"
+            "├ <code>+7 (999) 123-45-67</code>\n"
+            "├ <code>+79991234567</code>\n"
+            "└ <code>89991234567</code>",
+            parse_mode="HTML", reply_markup=cancel_kb(),
+            link_preview_options=NO_PREVIEW)
+        return
     await state.update_data(phone=phone)
     data = await state.get_data()
     await state.clear()
