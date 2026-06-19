@@ -59,7 +59,7 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
     await state.clear()
     async with async_session() as session:
         result = await session.execute(
-            select(Client).where(Client.telegram_id == message.from_user.id)
+            select(Client).where(Client.telegram_id == message.from_user.id).limit(1)
         )
         if not result.scalar_one_or_none():
             session.add(Client(telegram_id=message.from_user.id,
@@ -73,10 +73,12 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
 async def _start_booking(msg: Message, state: FSMContext) -> None:
     await state.clear()
     await state.set_state(BookingForm.name)
-    await send_section(msg, "booking")
-    await msg.answer("👤 <b>Как вас зовут?</b>",
-                     parse_mode="HTML", reply_markup=cancel_kb(),
-                     link_preview_options=NO_PREVIEW)
+    section = await get_content("booking")
+    intro = section.text if section else "🎬 <b>Запись подкаста</b>"
+    await msg.answer(
+        f"{intro}\n\n👤 <b>Как вас зовут?</b>",
+        parse_mode="HTML", reply_markup=cancel_kb(),
+        link_preview_options=NO_PREVIEW)
 
 
 @router.message(F.text == "🏠 Забронировать студию")
@@ -122,7 +124,7 @@ async def booking_date(callback: CallbackQuery, state: FSMContext) -> None:
     blocked = await get_booked_hours(chosen_date)
     await callback.message.edit_text(
         f"✅ {chosen_date}\n\n🕐 <b>Выберите время начала съёмок:</b>",
-        parse_mode="HTML", reply_markup=times_kb(blocked))
+        parse_mode="HTML", reply_markup=times_kb(blocked, chosen_date))
     await callback.answer()
 
 
@@ -148,7 +150,8 @@ async def booking_hours(callback: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(hours=hours)
     await state.set_state(BookingForm.phone)
     await callback.message.edit_text(
-        f"✅ {hours} ч\n\n📱 <b>Укажите ваш номер телефона:</b>",
+        f"✅ {hours} ч\n\n📱 <b>Укажите ваш номер телефона:</b>\n"
+        "<i>Формат: +79991234567 или 89991234567</i>",
         parse_mode="HTML", reply_markup=cancel_kb())
     await callback.answer()
 
@@ -181,21 +184,15 @@ async def booking_phone(message: Message, state: FSMContext) -> None:
     hours_int = int(data.get("hours", 1))
 
     async with async_session() as session:
-        result = await session.execute(select(Client).where(Client.telegram_id == tg_id))
-        client = result.scalar_one_or_none()
-        fields = dict(
+        session.add(Client(
+            telegram_id=tg_id, username=username,
             name=data.get("name"), phone=phone,
             service=data.get("content_type"),
             booking_date=data.get("date"),
             booking_time=data.get("time"),
             booking_hours=hours_int,
             status="new_request", lead_type="booking",
-        )
-        if client:
-            for k, v in fields.items():
-                setattr(client, k, v)
-        else:
-            session.add(Client(telegram_id=tg_id, username=username, **fields))
+        ))
         await session.commit()
 
     summary = (
@@ -249,10 +246,12 @@ async def show_address(message: Message, state: FSMContext) -> None:
 async def _start_free(msg: Message, state: FSMContext) -> None:
     await state.clear()
     await state.set_state(FreeEpisodeForm.name)
-    await send_section(msg, "free")
-    await msg.answer("👤 <b>Как вас зовут?</b>",
-                     parse_mode="HTML", reply_markup=cancel_kb(),
-                     link_preview_options=NO_PREVIEW)
+    section = await get_content("free")
+    intro = section.text if section else "🔥 <b>Первый выпуск бесплатно</b>"
+    await msg.answer(
+        f"{intro}\n\n👤 <b>Как вас зовут?</b>",
+        parse_mode="HTML", reply_markup=cancel_kb(),
+        link_preview_options=NO_PREVIEW)
 
 
 @router.callback_query(F.data == "go_free_episode")
@@ -293,7 +292,7 @@ async def free_date(callback: CallbackQuery, state: FSMContext) -> None:
     blocked = await get_booked_hours(chosen_date)
     await callback.message.edit_text(
         f"✅ {chosen_date}\n\n🕐 <b>Выберите время начала съёмок:</b>",
-        parse_mode="HTML", reply_markup=times_kb(blocked))
+        parse_mode="HTML", reply_markup=times_kb(blocked, chosen_date))
     await callback.answer()
 
 
@@ -319,7 +318,8 @@ async def free_hours(callback: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(hours=hours)
     await state.set_state(FreeEpisodeForm.phone)
     await callback.message.edit_text(
-        f"✅ {hours} ч\n\n📱 <b>Укажите ваш номер телефона:</b>",
+        f"✅ {hours} ч\n\n📱 <b>Укажите ваш номер телефона:</b>\n"
+        "<i>Формат: +79991234567 или 89991234567</i>",
         parse_mode="HTML", reply_markup=cancel_kb())
     await callback.answer()
 
@@ -346,21 +346,15 @@ async def free_phone(message: Message, state: FSMContext) -> None:
     hours_int = int(data.get("hours", 1))
 
     async with async_session() as session:
-        result = await session.execute(select(Client).where(Client.telegram_id == tg_id))
-        client = result.scalar_one_or_none()
-        fields = dict(
+        session.add(Client(
+            telegram_id=tg_id, username=username,
             name=data.get("name"), phone=phone,
             service=data.get("content_type"),
             booking_date=data.get("date"),
             booking_time=data.get("time"),
             booking_hours=hours_int,
             status="lead", lead_type="free_episode",
-        )
-        if client:
-            for k, v in fields.items():
-                setattr(client, k, v)
-        else:
-            session.add(Client(telegram_id=tg_id, username=username, **fields))
+        ))
         await session.commit()
 
     summary = (
