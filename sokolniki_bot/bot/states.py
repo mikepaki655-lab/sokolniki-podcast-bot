@@ -2,15 +2,7 @@ from aiogram.fsm.state import State, StatesGroup
 
 
 class BookingForm(StatesGroup):
-    name         = State()
-    content_type = State()
-    date         = State()
-    time         = State()
-    hours        = State()
-    phone        = State()
-
-
-class FreeEpisodeForm(StatesGroup):
+    """Used for both paid booking and free episode — lead_type stored in FSM data."""
     name         = State()
     content_type = State()
     date         = State()
@@ -26,14 +18,14 @@ class BroadcastForm(StatesGroup):
 
 
 class AdminAction(StatesGroup):
-    payment_amount   = State()
-    payment_hours    = State()
-    no_pay_reason    = State()
+    payment_amount    = State()
+    payment_hours     = State()
+    no_pay_reason     = State()
     reschedule_reason = State()
-    reschedule_date  = State()
-    reschedule_hours = State()
+    reschedule_date   = State()
+    reschedule_hours  = State()
 
 
-class AnalyticsPeriod(StatesGroup):
-    custom_start = State()
-    custom_end   = State()
+class EditContentFSM(StatesGroup):
+    edit_text  = State()
+    edit_photo = State()
