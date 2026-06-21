@@ -382,3 +382,18 @@ async def cancel_action(callback: CallbackQuery, state: FSMContext) -> None:
                                   reply_markup=main_menu(),
                                   link_preview_options=NO_PREVIEW)
     await callback.answer()
+
+
+# ─── CATCH-ALL (старые кнопки / неизвестный текст) ───────────────────────────
+
+@router.message()
+async def fallback_handler(message: Message, state: FSMContext) -> None:
+    """Сбрасывает состояние и возвращает главное меню на любой нераспознанный текст."""
+    current = await state.get_state()
+    if current is not None:
+        return  # пользователь внутри формы — не перебиваем
+    await message.answer(
+        "Выберите раздел 👇",
+        reply_markup=main_menu(),
+        link_preview_options=NO_PREVIEW,
+    )
