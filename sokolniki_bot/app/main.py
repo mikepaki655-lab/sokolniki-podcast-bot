@@ -14,6 +14,7 @@ from config import BOT_TOKEN
 from database.db import init_db
 from bot.handlers import router as user_router
 from bot.admin import router as admin_router
+from bot.scheduler import reminder_loop
 
 logging.basicConfig(
     level=logging.INFO,
@@ -36,7 +37,10 @@ async def main() -> None:
     dp.include_router(admin_router)
     dp.include_router(user_router)
 
+    # Start 24h reminder background task
+    asyncio.create_task(reminder_loop(bot))
     logger.info("Starting bot polling...")
+
     await dp.start_polling(bot, allowed_updates=["message", "callback_query"])
 
 
