@@ -1,6 +1,4 @@
-from datetime import date, datetime, timedelta, timezone
-
-MOSCOW_TZ = timezone(timedelta(hours=3))
+from datetime import date, timedelta
 
 from aiogram.types import (
     InlineKeyboardMarkup,
@@ -24,6 +22,7 @@ def main_menu() -> ReplyKeyboardMarkup:
         KeyboardButton(text="💰 Узнать цены"),
         KeyboardButton(text="📍 Адрес студии"),
     )
+    builder.row(KeyboardButton(text="🔥 Первый выпуск бесплатно"))
     return builder.as_markup(resize_keyboard=True)
 
 
@@ -36,7 +35,6 @@ def admin_main_menu() -> ReplyKeyboardMarkup:
         KeyboardButton(text="📨 Рассылка"),
         KeyboardButton(text="📊 Аналитика"),
     )
-    builder.row(KeyboardButton(text="📝 Редактор контента"))
     builder.row(KeyboardButton(text="◀️ Вернуться в бота"))
     return builder.as_markup(resize_keyboard=True)
 
@@ -90,21 +88,14 @@ def dates_kb() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def times_kb(blocked: set[int] | None = None, chosen_date: str | None = None) -> InlineKeyboardMarkup:
-    """Доступные слоты. Для сегодня — только часы >= текущий+1."""
+def times_kb(blocked: set[int] | None = None) -> InlineKeyboardMarkup:
+    """00:00–23:00, greys out blocked hours."""
     blocked = blocked or set()
-    min_hour = 0
-    if chosen_date:
-        now_msk = datetime.now(MOSCOW_TZ)
-        if chosen_date == now_msk.strftime("%d.%m.%Y"):
-            min_hour = now_msk.hour + 1
     builder = InlineKeyboardBuilder()
-    has_slots = False
     for h in range(24):
-        if h not in blocked and h >= min_hour:
+        if h not in blocked:
             builder.button(text=f"{h:02d}:00", callback_data=f"btime:{h:02d}:00")
-            has_slots = True
-    if not has_slots:
+    if not any(h not in blocked for h in range(24)):
         builder.button(text="⛔ Нет свободных слотов", callback_data="no_slots")
     builder.button(text="❌ Отмена", callback_data="cancel")
     builder.adjust(4)
@@ -202,17 +193,6 @@ def skip_cancel_kb() -> InlineKeyboardMarkup:
     builder.button(text="⏩ Пропустить", callback_data="skip")
     builder.button(text="❌ Отмена",     callback_data="cancel")
     builder.adjust(2)
-    return builder.as_markup()
-
-
-def analytics_period_kb() -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.button(text="📅 Текущая неделя",  callback_data="analytics:week_cur")
-    builder.button(text="📅 Прошлая неделя",  callback_data="analytics:week_prev")
-    builder.button(text="📆 Текущий месяц",   callback_data="analytics:month_cur")
-    builder.button(text="📆 Прошлый месяц",   callback_data="analytics:month_prev")
-    builder.button(text="🗓 Задать период",   callback_data="analytics:custom")
-    builder.adjust(2, 2, 1)
     return builder.as_markup()
 
 
