@@ -121,8 +121,8 @@ def _migrate(conn):
                 conn.execute(sa.text(
                     "INSERT INTO bookings "
                     "(client_id, lead_type, content_type, booking_date, booking_time, "
-                    "booking_hours, status, status_note, payment_amount, payment_hours) "
-                    "VALUES (:cid, :lt, :ct, :bd, :bt, :bh, :st, :sn, :pa, :ph)"
+                    "booking_hours, status, status_note, payment_amount, payment_hours, reminded) "
+                    "VALUES (:cid, :lt, :ct, :bd, :bt, :bh, :st, :sn, :pa, :ph, 0)"
                 ), {
                     "cid": cid,
                     "lt":  ltype or "booking",
