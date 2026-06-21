@@ -38,7 +38,7 @@ class Booking(Base):
     payment_amount:  Mapped[float | None]= mapped_column(Float,       nullable=True)
     payment_hours:   Mapped[float | None]= mapped_column(Float,       nullable=True)
     reschedule_from: Mapped[str | None]  = mapped_column(String(20),  nullable=True)
-    reminded:        Mapped[int]         = mapped_column(Integer, default=0)              # 1 = reminder sent
+    reminded:        Mapped[int]         = mapped_column(Integer, default=0, server_default="0")  # 1 = reminder sent
     created_at:      Mapped[datetime]    = mapped_column(DateTime, default=func.now(), server_default=func.now())
     updated_at:      Mapped[datetime]    = mapped_column(DateTime, default=func.now(),
                                                          onupdate=func.now(), server_default=func.now())
