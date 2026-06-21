@@ -59,7 +59,7 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
     await state.clear()
     async with async_session() as session:
         result = await session.execute(
-            select(Client).where(Client.telegram_id == message.from_user.id).limit(1)
+            select(Client).where(Client.telegram_id == message.from_user.id)
         )
         if not result.scalar_one_or_none():
             session.add(Client(telegram_id=message.from_user.id,
@@ -73,15 +73,13 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
 async def _start_booking(msg: Message, state: FSMContext) -> None:
     await state.clear()
     await state.set_state(BookingForm.name)
-    section = await get_content("booking")
-    intro = section.text if section else "🎬 <b>Запись подкаста</b>"
-    await msg.answer(
-        f"{intro}\n\n👤 <b>Как вас зовут?</b>",
-        parse_mode="HTML", reply_markup=cancel_kb(),
-        link_preview_options=NO_PREVIEW)
+    await send_section(msg, "booking")
+    await msg.answer("👤 <b>Как вас зовут?</b>",
+                     parse_mode="HTML", reply_markup=cancel_kb(),
+                     link_preview_options=NO_PREVIEW)
 
 
-@router.message(F.text == "🏠 Забронировать студию")
+@router.message(F.text == "🎬 Записать подкаст")
 async def booking_start_msg(message: Message, state: FSMContext) -> None:
     await _start_booking(message, state)
 
@@ -124,7 +122,7 @@ async def booking_date(callback: CallbackQuery, state: FSMContext) -> None:
     blocked = await get_booked_hours(chosen_date)
     await callback.message.edit_text(
         f"✅ {chosen_date}\n\n🕐 <b>Выберите время начала съёмок:</b>",
-        parse_mode="HTML", reply_markup=times_kb(blocked, chosen_date))
+        parse_mode="HTML", reply_markup=times_kb(blocked))
     await callback.answer()
 
 
@@ -150,31 +148,14 @@ async def booking_hours(callback: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(hours=hours)
     await state.set_state(BookingForm.phone)
     await callback.message.edit_text(
-        f"✅ {hours} ч\n\n📱 <b>Укажите ваш номер телефона:</b>\n"
-        "<i>Формат: +79991234567 или 89991234567</i>",
+        f"✅ {hours} ч\n\n📱 <b>Укажите ваш номер телефона:</b>",
         parse_mode="HTML", reply_markup=cancel_kb())
     await callback.answer()
-
-
-def _validate_phone(phone: str) -> bool:
-    import re
-    cleaned = re.sub(r"[\s\-\(\)]", "", phone)
-    return bool(re.match(r"^(\+7|7|8)\d{10}$", cleaned))
 
 
 @router.message(BookingForm.phone)
 async def booking_phone(message: Message, state: FSMContext) -> None:
     phone = message.text.strip()
-    if not _validate_phone(phone):
-        await message.answer(
-            "⚠️ <b>Неверный формат номера телефона.</b>\n\n"
-            "Введите номер в одном из форматов:\n"
-            "├ <code>+7 (999) 123-45-67</code>\n"
-            "├ <code>+79991234567</code>\n"
-            "└ <code>89991234567</code>",
-            parse_mode="HTML", reply_markup=cancel_kb(),
-            link_preview_options=NO_PREVIEW)
-        return
     await state.update_data(phone=phone)
     data = await state.get_data()
     await state.clear()
@@ -184,27 +165,33 @@ async def booking_phone(message: Message, state: FSMContext) -> None:
     hours_int = int(data.get("hours", 1))
 
     async with async_session() as session:
-        session.add(Client(
-            telegram_id=tg_id, username=username,
+        result = await session.execute(select(Client).where(Client.telegram_id == tg_id))
+        client = result.scalar_one_or_none()
+        fields = dict(
             name=data.get("name"), phone=phone,
             service=data.get("content_type"),
             booking_date=data.get("date"),
             booking_time=data.get("time"),
             booking_hours=hours_int,
             status="new_request", lead_type="booking",
-        ))
+        )
+        if client:
+            for k, v in fields.items():
+                setattr(client, k, v)
+        else:
+            session.add(Client(telegram_id=tg_id, username=username, **fields))
         await session.commit()
 
     summary = (
-        "📋 <b>Ваша заявка</b>\n"
+        "📋 <b>Ваша заявка принята!</b>\n\n"
         f"├ 👤 Имя: <b>{data.get('name')}</b>\n"
         f"├ 📱 Телефон: <b>{phone}</b>\n"
         f"├ 🎬 Контент: <b>{data.get('content_type')}</b>\n"
         f"├ 📅 Дата: <b>{data.get('date')}</b>\n"
         f"├ 🕐 Время: <b>{data.get('time')}</b>\n"
         f"└ ⏱ Длительность: <b>{hours_int} ч</b>\n\n"
-        "✅ <b>Спасибо за заявку!</b>\n"
-        "└ Скоро с вами свяжемся 🎙"
+        "✅ Мы свяжемся с вами в ближайшее время\n"
+        "└ для подтверждения брони 🎙"
     )
     await message.answer(summary, parse_mode="HTML",
                          reply_markup=main_menu(), link_preview_options=NO_PREVIEW)
@@ -246,12 +233,15 @@ async def show_address(message: Message, state: FSMContext) -> None:
 async def _start_free(msg: Message, state: FSMContext) -> None:
     await state.clear()
     await state.set_state(FreeEpisodeForm.name)
-    section = await get_content("free")
-    intro = section.text if section else "🔥 <b>Первый выпуск бесплатно</b>"
-    await msg.answer(
-        f"{intro}\n\n👤 <b>Как вас зовут?</b>",
-        parse_mode="HTML", reply_markup=cancel_kb(),
-        link_preview_options=NO_PREVIEW)
+    await send_section(msg, "free")
+    await msg.answer("👤 <b>Как вас зовут?</b>",
+                     parse_mode="HTML", reply_markup=cancel_kb(),
+                     link_preview_options=NO_PREVIEW)
+
+
+@router.message(F.text == "🔥 Первый выпуск бесплатно")
+async def show_free_episode(message: Message, state: FSMContext) -> None:
+    await send_section(message, "free", reply_markup=free_episode_kb())
 
 
 @router.callback_query(F.data == "go_free_episode")
@@ -292,7 +282,7 @@ async def free_date(callback: CallbackQuery, state: FSMContext) -> None:
     blocked = await get_booked_hours(chosen_date)
     await callback.message.edit_text(
         f"✅ {chosen_date}\n\n🕐 <b>Выберите время начала съёмок:</b>",
-        parse_mode="HTML", reply_markup=times_kb(blocked, chosen_date))
+        parse_mode="HTML", reply_markup=times_kb(blocked))
     await callback.answer()
 
 
@@ -318,8 +308,7 @@ async def free_hours(callback: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(hours=hours)
     await state.set_state(FreeEpisodeForm.phone)
     await callback.message.edit_text(
-        f"✅ {hours} ч\n\n📱 <b>Укажите ваш номер телефона:</b>\n"
-        "<i>Формат: +79991234567 или 89991234567</i>",
+        f"✅ {hours} ч\n\n📱 <b>Укажите ваш номер телефона:</b>",
         parse_mode="HTML", reply_markup=cancel_kb())
     await callback.answer()
 
@@ -327,16 +316,6 @@ async def free_hours(callback: CallbackQuery, state: FSMContext) -> None:
 @router.message(FreeEpisodeForm.phone)
 async def free_phone(message: Message, state: FSMContext) -> None:
     phone = message.text.strip()
-    if not _validate_phone(phone):
-        await message.answer(
-            "⚠️ <b>Неверный формат номера телефона.</b>\n\n"
-            "Введите номер в одном из форматов:\n"
-            "├ <code>+7 (999) 123-45-67</code>\n"
-            "├ <code>+79991234567</code>\n"
-            "└ <code>89991234567</code>",
-            parse_mode="HTML", reply_markup=cancel_kb(),
-            link_preview_options=NO_PREVIEW)
-        return
     await state.update_data(phone=phone)
     data = await state.get_data()
     await state.clear()
@@ -346,15 +325,21 @@ async def free_phone(message: Message, state: FSMContext) -> None:
     hours_int = int(data.get("hours", 1))
 
     async with async_session() as session:
-        session.add(Client(
-            telegram_id=tg_id, username=username,
+        result = await session.execute(select(Client).where(Client.telegram_id == tg_id))
+        client = result.scalar_one_or_none()
+        fields = dict(
             name=data.get("name"), phone=phone,
             service=data.get("content_type"),
             booking_date=data.get("date"),
             booking_time=data.get("time"),
             booking_hours=hours_int,
             status="lead", lead_type="free_episode",
-        ))
+        )
+        if client:
+            for k, v in fields.items():
+                setattr(client, k, v)
+        else:
+            session.add(Client(telegram_id=tg_id, username=username, **fields))
         await session.commit()
 
     summary = (
