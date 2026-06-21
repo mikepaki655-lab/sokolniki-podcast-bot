@@ -1,12 +1,11 @@
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, LinkPreviewOptions, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from sqlalchemy import func, select
 
 from bot.keyboards import (
     admin_bookings_menu, admin_broadcast_menu, admin_main_menu,
@@ -14,33 +13,49 @@ from bot.keyboards import (
     content_sections_kb, main_menu, new_booking_actions_kb,
     processing_booking_actions_kb,
 )
-from bot.states import AdminAction, BroadcastForm
+from bot.states import AdminAction, BroadcastForm, EditContentFSM
 from config import ADMIN_ID
 from database.db import (
-    async_session, get_all_content, get_content,
-    reset_content_to_defaults, update_content_photo, update_content_text,
+    async_session, get_all_content, get_analytics, get_booking_with_client,
+    get_bookings_by_status, get_content, get_or_create_client,
+    reset_content_to_defaults, update_booking_status,
+    update_content_photo, update_content_text,
 )
-from database.models import Client
-from bot.states import AdminAction
+from database.models import Booking, Client
 
 router = Router()
 logger = logging.getLogger(__name__)
 NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
 
-# Statuses shown in each tab
 NEW_STATUSES        = {"new_request", "lead"}
 PROCESSING_STATUSES = {"confirmed", "recorded", "paid"}
 DONE_STATUSES       = {"done_paid", "done_no_pay", "rescheduled_done"}
 
 STATUS_LABELS = {
-    "new_request":     "🆕 Новая",
-    "lead":            "🔥 Лид",
-    "confirmed":       "✅ Подтверждена",
-    "recorded":        "🎬 Записан",
-    "paid":            "💰 Оплатил",
-    "done_paid":       "✅ Завершена (оплата)",
-    "done_no_pay":     "❌ Завершена (без оплаты)",
-    "rescheduled_done":"🔄 Перенесена",
+    "new_request":      "🆕 Новая",
+    "lead":             "🔥 Лид",
+    "confirmed":        "✅ Подтверждена",
+    "recorded":         "🎬 Записан",
+    "paid":             "💰 Оплатил",
+    "done_paid":        "✅ Завершена (оплата)",
+    "done_no_pay":      "❌ Завершена (без оплаты)",
+    "rescheduled_done": "🔄 Перенесена",
+}
+
+CLIENT_MESSAGES = {
+    "confirmed": (
+        "✅ <b>Ваша бронь подтверждена!</b>\n\n"
+        "└ Ждём вас в студии «Сокольники» 🎙\n"
+        "   г. Москва, Песочный пер., дом 3"
+    ),
+    "recorded": (
+        "🎬 <b>Спасибо за визит!</b>\n\n"
+        "└ Ваш выпуск в работе — скоро пришлём результат 🎉"
+    ),
+    "paid": (
+        "💰 <b>Оплата получена, спасибо!</b>\n\n"
+        "└ Студия «Сокольники» рада сотрудничеству 🎙"
+    ),
 }
 
 
@@ -58,12 +73,9 @@ async def cmd_admin(message: Message, state: FSMContext) -> None:
     await state.clear()
     await message.answer(
         "🎛 <b>Панель управления</b>\n└ Выберите раздел:",
-        parse_mode="HTML",
-        reply_markup=admin_main_menu(),
+        parse_mode="HTML", reply_markup=admin_main_menu(),
     )
 
-
-# ─── ВЕРНУТЬСЯ В БОТА ─────────────────────────────────────────────────────────
 
 @router.message(F.text == "◀️ Вернуться в бота")
 async def back_to_bot(message: Message, state: FSMContext) -> None:
@@ -95,32 +107,25 @@ async def bookings_back(message: Message, state: FSMContext) -> None:
 
 
 async def _show_bookings_list(message: Message, statuses: set, title: str) -> None:
-    async with async_session() as session:
-        clients = (await session.execute(
-            select(Client)
-            .where(Client.status.in_(statuses))
-            .order_by(Client.created_at.desc())
-            .limit(50)
-        )).scalars().all()
+    pairs = await get_bookings_by_status(statuses)
 
-    if not clients:
+    if not pairs:
         await message.answer(f"{title}\n└ Список пуст", parse_mode="HTML")
         return
 
     builder = InlineKeyboardBuilder()
-    for c in clients:
-        name     = c.name or "—"
-        d        = c.booking_date or "?"
-        badge    = STATUS_LABELS.get(c.status, c.status)
-        reschedule = f" ↩{c.reschedule_from}" if c.reschedule_from else ""
+    for booking, client in pairs:
+        name  = client.name or "—"
+        d     = booking.booking_date or "?"
+        badge = STATUS_LABELS.get(booking.status, booking.status)
+        reschedule = f" ↩{booking.reschedule_from}" if booking.reschedule_from else ""
         label = f"{name} · {d}{reschedule} · {badge}"
-        builder.button(text=label[:60], callback_data=f"view_client:{c.id}")
+        builder.button(text=label[:60], callback_data=f"view_booking:{booking.id}")
     builder.adjust(1)
 
     await message.answer(
-        f"{title}\n└ <b>{len(clients)}</b> заявок",
-        parse_mode="HTML",
-        reply_markup=builder.as_markup(),
+        f"{title}\n└ <b>{len(pairs)}</b> заявок",
+        parse_mode="HTML", reply_markup=builder.as_markup(),
     )
 
 
@@ -142,43 +147,44 @@ async def admin_done(message: Message, state: FSMContext) -> None:
     await _show_bookings_list(message, DONE_STATUSES, "✅ <b>Завершённые</b>")
 
 
-# ─── CLIENT DETAIL ────────────────────────────────────────────────────────────
+# ─── BOOKING DETAIL ───────────────────────────────────────────────────────────
 
-@router.callback_query(F.data.startswith("view_client:"))
-async def view_client(callback: CallbackQuery, state: FSMContext) -> None:
+@router.callback_query(F.data.startswith("view_booking:"))
+async def view_booking(callback: CallbackQuery) -> None:
     if not is_admin(callback.from_user.id):
         await callback.answer("⛔"); return
-    client_id = int(callback.data.split(":")[1])
-    async with async_session() as session:
-        client = await session.get(Client, client_id)
-    if not client:
-        await callback.answer("Клиент не найден."); return
+
+    booking_id = int(callback.data.split(":")[1])
+    pair = await get_booking_with_client(booking_id)
+    if not pair:
+        await callback.answer("Заявка не найдена."); return
+    booking, client = pair
 
     tg      = f"@{client.username}" if client.username else f"<code>{client.telegram_id}</code>"
-    created = client.created_at.strftime("%d.%m.%Y %H:%M") if client.created_at else "—"
-    reschedule_note = f"\n├ ↩ Перенесена с: <b>{client.reschedule_from}</b>" if client.reschedule_from else ""
-    note_line = f"\n└ 📝 {client.status_note}" if client.status_note else ""
+    created = booking.created_at.strftime("%d.%m.%Y %H:%M") if booking.created_at else "—"
+    reschedule_note = f"\n├ ↩ Перенесена с: <b>{booking.reschedule_from}</b>" if booking.reschedule_from else ""
+    note_line = f"\n└ 📝 {booking.status_note}" if booking.status_note else ""
+    lead_icon = "🔥" if booking.lead_type == "free_episode" else "📋"
 
     text = (
-        f"👤 <b>{client.name or 'Без имени'}</b>\n\n"
+        f"👤 <b>{client.name or 'Без имени'}</b> {lead_icon}\n\n"
         f"🪪 <b>Контакты</b>\n"
         f"├ Telegram: {tg}\n"
         f"└ Телефон: {client.phone or '—'}\n\n"
-        f"🎬 <b>Заявка</b>\n"
-        f"├ Контент: {client.service or '—'}\n"
-        f"├ Дата: {client.booking_date or '—'}\n"
-        f"├ Время: {client.booking_time or '—'}\n"
-        f"├ Часов: {client.booking_hours or '—'}\n"
+        f"🎬 <b>Заявка #{booking.id}</b>\n"
+        f"├ Контент: {booking.content_type or '—'}\n"
+        f"├ Дата: {booking.booking_date or '—'}\n"
+        f"├ Время: {booking.booking_time or '—'}\n"
+        f"├ Часов: {booking.booking_hours or '—'}\n"
         f"└ Создана: {created}\n\n"
-        f"📋 <b>Статус:</b> {STATUS_LABELS.get(client.status, client.status)}"
+        f"📋 <b>Статус:</b> {STATUS_LABELS.get(booking.status, booking.status)}"
         f"{reschedule_note}{note_line}"
     )
 
-    # Choose action keyboard based on current status
-    if client.status in NEW_STATUSES:
-        kb = new_booking_actions_kb(client_id)
-    elif client.status in PROCESSING_STATUSES:
-        kb = processing_booking_actions_kb(client_id)
+    if booking.status in NEW_STATUSES:
+        kb = new_booking_actions_kb(booking.id)
+    elif booking.status in PROCESSING_STATUSES:
+        kb = processing_booking_actions_kb(booking.id)
     else:
         kb = None
 
@@ -194,12 +200,13 @@ async def set_booking_status(callback: CallbackQuery, state: FSMContext) -> None
     if not is_admin(callback.from_user.id):
         await callback.answer("⛔"); return
 
-    _, client_id_str, new_status = callback.data.split(":")
-    client_id = int(client_id_str)
+    parts = callback.data.split(":")
+    booking_id = int(parts[1])
+    new_status = parts[2]
 
     if new_status == "done_paid":
         await state.set_state(AdminAction.payment_amount)
-        await state.update_data(target_client_id=client_id)
+        await state.update_data(target_booking_id=booking_id)
         await callback.message.answer(
             "💰 <b>Завершена с оплатой</b>\n└ Введите сумму оплаты (₽):",
             parse_mode="HTML", link_preview_options=NO_PREVIEW)
@@ -207,7 +214,7 @@ async def set_booking_status(callback: CallbackQuery, state: FSMContext) -> None
 
     if new_status == "done_no_pay":
         await state.set_state(AdminAction.no_pay_reason)
-        await state.update_data(target_client_id=client_id)
+        await state.update_data(target_booking_id=booking_id)
         await callback.message.answer(
             "❌ <b>Завершена без оплаты</b>\n└ Укажите причину:",
             parse_mode="HTML", link_preview_options=NO_PREVIEW)
@@ -215,18 +222,14 @@ async def set_booking_status(callback: CallbackQuery, state: FSMContext) -> None
 
     if new_status == "reschedule":
         await state.set_state(AdminAction.reschedule_reason)
-        await state.update_data(target_client_id=client_id)
+        await state.update_data(target_booking_id=booking_id)
         await callback.message.answer(
             "🔄 <b>Перенос заявки</b>\n└ Укажите причину переноса:",
             parse_mode="HTML", link_preview_options=NO_PREVIEW)
         await callback.answer(); return
 
-    # Simple status update (confirmed / recorded / paid)
-    async with async_session() as session:
-        client = await session.get(Client, client_id)
-        if client:
-            client.status = new_status
-            await session.commit()
+    # Simple status update
+    await update_booking_status(booking_id, status=new_status)
 
     label = STATUS_LABELS.get(new_status, new_status)
     await callback.answer(f"✅ {label}", show_alert=True)
@@ -234,6 +237,26 @@ async def set_booking_status(callback: CallbackQuery, state: FSMContext) -> None
         await callback.message.edit_reply_markup(reply_markup=None)
     except Exception:
         pass
+
+    # Notify client if applicable
+    await _notify_client(callback, booking_id, new_status)
+
+
+async def _notify_client(callback, booking_id: int, new_status: str) -> None:
+    """Send status notification to client if a message template exists."""
+    msg_text = CLIENT_MESSAGES.get(new_status)
+    if not msg_text:
+        return
+    pair = await get_booking_with_client(booking_id)
+    if not pair:
+        return
+    booking, client = pair
+    try:
+        await callback.bot.send_message(
+            client.telegram_id, msg_text,
+            parse_mode="HTML", link_preview_options=NO_PREVIEW)
+    except Exception as e:
+        logger.warning(f"Client notify failed for {client.telegram_id}: {e}")
 
 
 # ─── DONE WITH PAYMENT ────────────────────────────────────────────────────────
@@ -248,7 +271,7 @@ async def admin_payment_amount(message: Message, state: FSMContext) -> None:
 
     await state.update_data(payment_amount=amount)
     await state.set_state(AdminAction.payment_hours)
-    await message.answer("⏱ Сколько часов по факту (введите число)?",
+    await message.answer("⏱ Сколько часов по факту?",
                          link_preview_options=NO_PREVIEW)
 
 
@@ -262,15 +285,14 @@ async def admin_payment_hours(message: Message, state: FSMContext) -> None:
 
     data = await state.get_data()
     await state.clear()
-    client_id = data["target_client_id"]
+    booking_id = data["target_booking_id"]
 
-    async with async_session() as session:
-        client = await session.get(Client, client_id)
-        if client:
-            client.status         = "done_paid"
-            client.payment_amount = data["payment_amount"]
-            client.payment_hours  = hours
-            await session.commit()
+    booking = await update_booking_status(
+        booking_id,
+        status="done_paid",
+        payment_amount=data["payment_amount"],
+        payment_hours=hours,
+    )
 
     await message.answer(
         f"✅ <b>Завершена с оплатой</b>\n"
@@ -278,8 +300,21 @@ async def admin_payment_hours(message: Message, state: FSMContext) -> None:
         f"└ Часов: <b>{hours}</b>",
         parse_mode="HTML", link_preview_options=NO_PREVIEW)
 
+    # Notify client
+    pair = await get_booking_with_client(booking_id)
+    if pair:
+        _, client = pair
+        try:
+            await message.bot.send_message(
+                client.telegram_id,
+                "✅ <b>Спасибо за оплату!</b>\n\n"
+                "Ваша сессия завершена. Ждём вас снова в студии «Сокольники» 🎙",
+                parse_mode="HTML", link_preview_options=NO_PREVIEW)
+        except Exception:
+            pass
 
-# ─── DONE WITHOUT PAYMENT ────────────────────────────────────────────────────
+
+# ─── DONE WITHOUT PAYMENT ─────────────────────────────────────────────────────
 
 @router.message(AdminAction.no_pay_reason)
 async def admin_no_pay_reason(message: Message, state: FSMContext) -> None:
@@ -287,12 +322,12 @@ async def admin_no_pay_reason(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     await state.clear()
 
-    async with async_session() as session:
-        client = await session.get(Client, data["target_client_id"])
-        if client:
-            client.status      = "done_no_pay"
-            client.status_note = message.text.strip()
-            await session.commit()
+    booking_id = data["target_booking_id"]
+    await update_booking_status(
+        booking_id,
+        status="done_no_pay",
+        status_note=message.text.strip(),
+    )
 
     await message.answer(
         f"❌ <b>Завершена без оплаты</b>\n└ Причина: {message.text.strip()}",
@@ -306,7 +341,7 @@ async def admin_reschedule_reason(message: Message, state: FSMContext) -> None:
     if not is_admin(message.from_user.id): return
     await state.update_data(reschedule_reason=message.text.strip())
     await state.set_state(AdminAction.reschedule_date)
-    await message.answer("📅 Введите новую дату (например: 25.06.2026):",
+    await message.answer("📅 Новая дата (например: 25.07.2026):",
                          link_preview_options=NO_PREVIEW)
 
 
@@ -315,39 +350,56 @@ async def admin_reschedule_date(message: Message, state: FSMContext) -> None:
     if not is_admin(message.from_user.id): return
     await state.update_data(reschedule_new_date=message.text.strip())
     await state.set_state(AdminAction.reschedule_hours)
-    await message.answer("⏱ Кол-во часов для новой брони:",
+    await message.answer("🕐 Новое время начала (например: 14:00):",
                          link_preview_options=NO_PREVIEW)
 
 
 @router.message(AdminAction.reschedule_hours)
 async def admin_reschedule_hours(message: Message, state: FSMContext) -> None:
     if not is_admin(message.from_user.id): return
-    try:
-        hours = int(message.text.strip())
-    except ValueError:
-        await message.answer("⚠️ Введите число."); return
-
     data = await state.get_data()
     await state.clear()
-    client_id = data["target_client_id"]
 
-    async with async_session() as session:
-        client = await session.get(Client, client_id)
-        if client:
-            old_date             = client.booking_date
-            client.reschedule_from = old_date
-            client.booking_date  = data["reschedule_new_date"]
-            client.booking_hours = hours
-            client.status        = "new_request"
-            client.status_note   = data.get("reschedule_reason", "")
-            await session.commit()
+    booking_id   = data["target_booking_id"]
+    new_date     = data["reschedule_new_date"]
+    new_time     = message.text.strip()
+    reason       = data.get("reschedule_reason", "")
+
+    # Get current booking_date for reschedule_from
+    pair = await get_booking_with_client(booking_id)
+    old_date = pair[0].booking_date if pair else "?"
+
+    await update_booking_status(
+        booking_id,
+        status="new_request",
+        booking_date=new_date,
+        booking_time=new_time,
+        reschedule_from=old_date,
+        status_note=reason,
+        reminded=0,          # reset reminder so client gets reminder for new date
+    )
+
+    # Notify client
+    if pair:
+        _, client = pair
+        try:
+            await message.bot.send_message(
+                client.telegram_id,
+                f"🔄 <b>Ваша сессия перенесена</b>\n\n"
+                f"├ 📅 Новая дата: <b>{new_date}</b>\n"
+                f"├ 🕐 Время: <b>{new_time}</b>\n"
+                f"└ Причина: {reason or '—'}\n\n"
+                "Если удобно — ждём вас! Если нет — напишите нам 📩",
+                parse_mode="HTML", link_preview_options=NO_PREVIEW)
+        except Exception:
+            pass
 
     await message.answer(
         f"🔄 <b>Заявка перенесена</b>\n"
-        f"├ Новая дата: <b>{data['reschedule_new_date']}</b>\n"
-        f"├ Часов: <b>{hours}</b>\n"
-        f"└ Причина: {data.get('reschedule_reason','—')}\n\n"
-        "Заявка появилась в разделе <b>🆕 Новые</b> с пометкой о переносе.",
+        f"├ Новая дата: <b>{new_date}</b>\n"
+        f"├ Новое время: <b>{new_time}</b>\n"
+        f"└ Причина: {reason or '—'}\n\n"
+        "Заявка появилась в разделе <b>🆕 Новые</b>.",
         parse_mode="HTML", link_preview_options=NO_PREVIEW)
 
 
@@ -357,33 +409,16 @@ async def admin_reschedule_hours(message: Message, state: FSMContext) -> None:
 async def admin_analytics(message: Message) -> None:
     if not is_admin(message.from_user.id): return
 
-    now      = datetime.now(timezone.utc)
-    week_ago = now - timedelta(days=7)
-
-    async with async_session() as session:
-        async def cnt(since, *filters):
-            q = select(func.count()).select_from(Client).where(
-                Client.created_at >= since, *filters)
-            return (await session.execute(q)).scalar_one()
-
-        async def sum_col(col, since):
-            q = select(func.sum(col)).where(
-                Client.created_at >= since, col.isnot(None))
-            return (await session.execute(q)).scalar_one() or 0
-
-        new_w   = await cnt(week_ago, Client.status.in_(NEW_STATUSES))
-        proc_w  = await cnt(week_ago, Client.status.in_(PROCESSING_STATUSES))
-        done_w  = await cnt(week_ago, Client.status == "done_paid")
-        revenue = await sum_col(Client.payment_amount, week_ago)
-        hours   = await sum_col(Client.payment_hours, week_ago)
+    stats = await get_analytics(days=7)
 
     await message.answer(
-        "📊 <b>Аналитика за 7 дней</b>\n\n"
-        f"├ 🆕 Новых заявок: <b>{new_w}</b>\n"
-        f"├ ⚙️ В обработке: <b>{proc_w}</b>\n"
-        f"├ ✅ Завершено с оплатой: <b>{done_w}</b>\n"
-        f"├ 💵 Выручка: <b>{revenue:,.0f} ₽</b>\n"
-        f"└ ⏱ Часов забронировано: <b>{hours:.1f} ч</b>",
+        "📊 <b>Аналитика за 7 дней</b>\n"
+        "<i>(по дате съёмки)</i>\n\n"
+        f"├ 🆕 Новых заявок: <b>{stats['new']}</b>\n"
+        f"├ ⚙️ В обработке: <b>{stats['proc']}</b>\n"
+        f"├ ✅ Завершено с оплатой: <b>{stats['done']}</b>\n"
+        f"├ 💵 Выручка: <b>{stats['revenue']:,.0f} ₽</b>\n"
+        f"└ ⏱ Часов отработано: <b>{stats['hours']:.1f} ч</b>",
         parse_mode="HTML", link_preview_options=NO_PREVIEW)
 
 
@@ -422,7 +457,7 @@ async def broadcast_get_message(message: Message, state: FSMContext) -> None:
     await state.set_state(BroadcastForm.confirm)
     data = await state.get_data()
     await message.answer(
-        f"📨 <b>Подтверждение</b>\n"
+        f"📨 <b>Подтверждение рассылки</b>\n"
         f"├ Кому: <b>{data.get('broadcast_target')}</b>\n"
         f"└ Текст:\n\n<i>{message.text}</i>\n\nОтправить?",
         parse_mode="HTML",
@@ -438,14 +473,22 @@ async def broadcast_send(callback: CallbackQuery, state: FSMContext) -> None:
     text   = data.get("broadcast_text", "")
     await state.clear()
 
+    from sqlalchemy import select as sa_select
     async with async_session() as session:
-        q = select(Client.telegram_id)
-        if target == "new_request":
-            q = q.where(Client.status.in_(NEW_STATUSES))
-        elif target == "processing":
-            q = q.where(Client.status.in_(PROCESSING_STATUSES))
-        elif target == "done":
-            q = q.where(Client.status.in_(DONE_STATUSES))
+        q = sa_select(Client.telegram_id)
+        if target != "all":
+            if target == "new_request":
+                status_filter = NEW_STATUSES
+            elif target == "processing":
+                status_filter = PROCESSING_STATUSES
+            else:
+                status_filter = DONE_STATUSES
+            # Get telegram_ids that have bookings with matching status
+            from sqlalchemy import distinct
+            from database.models import Booking as BookingModel
+            q = (sa_select(distinct(Client.telegram_id))
+                 .join(BookingModel, BookingModel.client_id == Client.id)
+                 .where(BookingModel.status.in_(status_filter)))
         ids = [r[0] for r in (await session.execute(q)).fetchall()]
 
     sent = failed = 0
@@ -474,15 +517,18 @@ async def broadcast_cancel_cb(callback: CallbackQuery, state: FSMContext) -> Non
 
 # ─── CONTENT EDITOR ───────────────────────────────────────────────────────────
 
-from aiogram.fsm.state import State, StatesGroup
-
-class EditContentFSM(StatesGroup):
-    edit_text  = State()
-    edit_photo = State()
+@router.message(F.text == "📝 Контент")
+async def admin_content_menu(message: Message, state: FSMContext) -> None:
+    if not is_admin(message.from_user.id): return
+    await state.clear()
+    sections = await get_all_content()
+    await message.answer(
+        "📝 <b>Редактор контента</b>\n└ Выберите раздел:",
+        parse_mode="HTML", reply_markup=content_sections_kb(sections))
 
 
 @router.callback_query(F.data == "admin:content")
-async def admin_content(callback: CallbackQuery, state: FSMContext) -> None:
+async def admin_content_cb(callback: CallbackQuery, state: FSMContext) -> None:
     if not is_admin(callback.from_user.id): await callback.answer("⛔"); return
     await state.clear()
     sections = await get_all_content()
@@ -541,43 +587,40 @@ async def content_save_text(message: Message, state: FSMContext) -> None:
 @router.callback_query(F.data.startswith("content:edit_photo:"))
 async def content_start_edit_photo(callback: CallbackQuery, state: FSMContext) -> None:
     if not is_admin(callback.from_user.id): await callback.answer("⛔"); return
-    key     = callback.data.split(":", 2)[2]
-    section = await get_content(key)
+    key = callback.data.split(":", 2)[2]
     await state.set_state(EditContentFSM.edit_photo)
     await state.update_data(editing_key=key)
     await callback.message.answer(
-        f"🖼 <b>Замена фото: {section.title}</b>\n"
-        "└ Рекомендуемый размер: 640×360\n\nОтправьте новое фото:",
-        parse_mode="HTML", reply_markup=content_back_to_section_kb(key))
+        "🖼 Отправьте новое фото для раздела:",
+        reply_markup=content_back_to_section_kb(key))
     await callback.answer()
 
 
-@router.message(EditContentFSM.edit_photo, F.photo)
+@router.message(EditContentFSM.edit_photo)
 async def content_save_photo(message: Message, state: FSMContext) -> None:
     if not is_admin(message.from_user.id): return
+    if not message.photo:
+        await message.answer("⚠️ Отправьте фото.")
+        return
     data    = await state.get_data()
     key     = data.get("editing_key")
-    await state.clear()
     file_id = message.photo[-1].file_id
+    await state.clear()
     await update_content_photo(key, file_id)
     section = await get_content(key)
-    await message.answer(f"✅ <b>Фото обновлено: {section.title}</b>",
-                         parse_mode="HTML", reply_markup=content_edit_kb(key),
-                         link_preview_options=NO_PREVIEW)
-
-
-@router.message(EditContentFSM.edit_photo)
-async def content_photo_wrong(message: Message) -> None:
-    await message.answer("⚠️ Отправьте фото (не файл, не ссылку).")
+    await message.answer(
+        f"✅ <b>Фото обновлено: {section.title}</b>",
+        parse_mode="HTML", reply_markup=content_edit_kb(key))
 
 
 @router.callback_query(F.data.startswith("content:preview:"))
 async def content_preview(callback: CallbackQuery) -> None:
     if not is_admin(callback.from_user.id): await callback.answer("⛔"); return
-    import os
-    from aiogram.types import FSInputFile
     key     = callback.data.split(":", 2)[2]
     section = await get_content(key)
+    if not section:
+        await callback.answer("Раздел не найден."); return
+    import os
     IMAGES_DIR = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "images")
     photo_sent = False
@@ -585,23 +628,19 @@ async def content_preview(callback: CallbackQuery) -> None:
         try:
             await callback.message.answer_photo(
                 photo=section.photo_file_id, caption=section.text,
-                parse_mode="HTML", reply_markup=content_edit_kb(key))
+                parse_mode="HTML")
             photo_sent = True
         except Exception:
             pass
     if not photo_sent and section.local_banner:
+        from aiogram.types import FSInputFile
         path = os.path.join(IMAGES_DIR, section.local_banner)
         if os.path.exists(path):
             await callback.message.answer_photo(
                 photo=FSInputFile(path), caption=section.text,
-                parse_mode="HTML", reply_markup=content_edit_kb(key))
-    await callback.answer()
-
-
-@router.message(Command("reset_content"))
-async def cmd_reset_content(message: Message) -> None:
-    if not is_admin(message.from_user.id):
-        await message.answer("⛔ Доступ запрещён."); return
-    await reset_content_to_defaults()
-    await message.answer("✅ <b>Тексты сброшены к стандартным</b>",
-                         parse_mode="HTML")
+                parse_mode="HTML")
+            photo_sent = True
+    if not photo_sent:
+        await callback.message.answer(section.text, parse_mode="HTML",
+                                      link_preview_options=NO_PREVIEW)
+    await callback.answer("👁 Предпросмотр")
