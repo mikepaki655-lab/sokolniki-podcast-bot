@@ -385,7 +385,7 @@ async def admin_reschedule_hours(message: Message, state: FSMContext) -> None:
         try:
             await message.bot.send_message(
                 client.telegram_id,
-                f"🔄 <b>Ваша сессия перенесена</b>\n\n"
+                f"🔄 <b>Ваша бронь перенесена</b>\n\n"
                 f"├ 📅 Новая дата: <b>{new_date}</b>\n"
                 f"├ 🕐 Время: <b>{new_time}</b>\n"
                 f"└ Причина: {reason or '—'}\n\n"
