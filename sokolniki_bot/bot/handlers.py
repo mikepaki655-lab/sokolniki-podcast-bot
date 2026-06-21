@@ -79,7 +79,7 @@ async def _start_booking(msg: Message, state: FSMContext) -> None:
                      link_preview_options=NO_PREVIEW)
 
 
-@router.message(F.text == "🎬 Записать подкаст")
+@router.message(F.text.in_({"🏠 Забронировать студию", "🎬 Записать подкаст"}))
 async def booking_start_msg(message: Message, state: FSMContext) -> None:
     await _start_booking(message, state)
 
