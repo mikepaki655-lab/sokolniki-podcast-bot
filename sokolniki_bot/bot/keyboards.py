@@ -13,7 +13,7 @@ MONTHS   = ["янв", "фев", "мар", "апр", "май", "июн",
             "июл", "авг", "сен", "окт", "ноя", "дек"]
 
 
-# ─── USER MENUS ───────────────────────────────────────────────────────────────
+# ─── USER MAIN MENU ───────────────────────────────────────────────────────────
 
 def main_menu() -> ReplyKeyboardMarkup:
     builder = ReplyKeyboardBuilder()
@@ -35,6 +35,7 @@ def admin_main_menu() -> ReplyKeyboardMarkup:
         KeyboardButton(text="📨 Рассылка"),
         KeyboardButton(text="📊 Аналитика"),
     )
+    builder.row(KeyboardButton(text="📝 Контент"))
     builder.row(KeyboardButton(text="◀️ Вернуться в бота"))
     return builder.as_markup(resize_keyboard=True)
 
@@ -89,13 +90,14 @@ def dates_kb() -> InlineKeyboardMarkup:
 
 
 def times_kb(blocked: set[int] | None = None) -> InlineKeyboardMarkup:
-    """00:00–23:00, greys out blocked hours."""
+    """00:00–23:00, skips blocked hours."""
     blocked = blocked or set()
     builder = InlineKeyboardBuilder()
-    for h in range(24):
-        if h not in blocked:
+    free = [h for h in range(24) if h not in blocked]
+    if free:
+        for h in free:
             builder.button(text=f"{h:02d}:00", callback_data=f"btime:{h:02d}:00")
-    if not any(h not in blocked for h in range(24)):
+    else:
         builder.button(text="⛔ Нет свободных слотов", callback_data="no_slots")
     builder.button(text="❌ Отмена", callback_data="cancel")
     builder.adjust(4)
@@ -111,29 +113,37 @@ def hours_kb() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+# ─── PHONE REQUEST (Reply Keyboard) ──────────────────────────────────────────
+
+def phone_request_kb() -> ReplyKeyboardMarkup:
+    """Native Telegram contact-sharing button + text fallback."""
+    builder = ReplyKeyboardBuilder()
+    builder.row(KeyboardButton(text="📱 Поделиться номером", request_contact=True))
+    builder.row(KeyboardButton(text="❌ Отмена"))
+    return builder.as_markup(resize_keyboard=True, one_time_keyboard=True)
+
+
 # ─── ADMIN INLINE BOOKING ACTIONS ─────────────────────────────────────────────
 
-def new_booking_actions_kb(client_id: int) -> InlineKeyboardMarkup:
-    """Actions for bookings in 'Новые'."""
+def new_booking_actions_kb(booking_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.button(text="✅ Подтвердить бронирование", callback_data=f"bstatus:{client_id}:confirmed")
-    builder.button(text="🎬 Записал видео",            callback_data=f"bstatus:{client_id}:recorded")
-    builder.button(text="💰 Оплатил",                  callback_data=f"bstatus:{client_id}:paid")
+    builder.button(text="✅ Подтвердить бронирование", callback_data=f"bstatus:{booking_id}:confirmed")
+    builder.button(text="🎬 Записал видео",            callback_data=f"bstatus:{booking_id}:recorded")
+    builder.button(text="💰 Оплатил",                  callback_data=f"bstatus:{booking_id}:paid")
     builder.adjust(1)
     return builder.as_markup()
 
 
-def processing_booking_actions_kb(client_id: int) -> InlineKeyboardMarkup:
-    """Actions for bookings 'В обработке'."""
+def processing_booking_actions_kb(booking_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.button(text="✅ Завершена с оплатой",   callback_data=f"bstatus:{client_id}:done_paid")
-    builder.button(text="❌ Завершена без оплаты",  callback_data=f"bstatus:{client_id}:done_no_pay")
-    builder.button(text="🔄 Перенести",             callback_data=f"bstatus:{client_id}:reschedule")
+    builder.button(text="✅ Завершена с оплатой",  callback_data=f"bstatus:{booking_id}:done_paid")
+    builder.button(text="❌ Завершена без оплаты", callback_data=f"bstatus:{booking_id}:done_no_pay")
+    builder.button(text="🔄 Перенести",            callback_data=f"bstatus:{booking_id}:reschedule")
     builder.adjust(1)
     return builder.as_markup()
 
 
-# ─── BROADCAST INLINE ─────────────────────────────────────────────────────────
+# ─── BROADCAST / CONTENT / MISC ───────────────────────────────────────────────
 
 def broadcast_confirm_kb() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
@@ -142,8 +152,6 @@ def broadcast_confirm_kb() -> InlineKeyboardMarkup:
     builder.adjust(2)
     return builder.as_markup()
 
-
-# ─── CONTENT EDITOR INLINE ────────────────────────────────────────────────────
 
 def content_sections_kb(sections: list) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
@@ -168,8 +176,6 @@ def content_back_to_section_kb(key: str) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-# ─── MISC ─────────────────────────────────────────────────────────────────────
-
 def prices_kb() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="📝 Записаться", callback_data="go_booking")
@@ -185,14 +191,6 @@ def free_episode_kb() -> InlineKeyboardMarkup:
 def cancel_kb() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="❌ Отмена", callback_data="cancel")
-    return builder.as_markup()
-
-
-def skip_cancel_kb() -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.button(text="⏩ Пропустить", callback_data="skip")
-    builder.button(text="❌ Отмена",     callback_data="cancel")
-    builder.adjust(2)
     return builder.as_markup()
 
 
