@@ -1,29 +1,34 @@
 import logging
 import os
-from datetime import datetime, timezone, timedelta
 
 from aiogram import F, Router
-from aiogram.filters import CommandStart
+from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, FSInputFile, LinkPreviewOptions, Message
+from aiogram.types import (
+    CallbackQuery, Contact, FSInputFile, LinkPreviewOptions, Message,
+)
 from sqlalchemy import select
 
 from bot.keyboards import (
-    cancel_kb, content_type_kb, dates_kb, free_episode_kb,
-    hours_kb, main_menu, prices_kb, skip_cancel_kb, times_kb,
+    cancel_kb, content_type_kb, dates_kb, free_episode_kb, hours_kb,
+    main_menu, phone_request_kb, prices_kb, remove_kb, times_kb,
 )
-from bot.states import BookingForm, FreeEpisodeForm
+from bot.states import BookingForm
 from config import ADMIN_ID
-from database.db import async_session, get_booked_hours, get_content
+from database.db import (
+    async_session, create_booking, get_booked_hours,
+    get_content, get_or_create_client, update_client_profile,
+)
 from database.models import Client
 
 router = Router()
 logger = logging.getLogger(__name__)
 
 IMAGES_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "images")
-MOSCOW_TZ  = timezone(timedelta(hours=3))
 NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
 
+
+# ─── UTILS ────────────────────────────────────────────────────────────────────
 
 async def send_section(message: Message, key: str, reply_markup=None) -> None:
     section = await get_content(key)
@@ -52,28 +57,45 @@ async def send_section(message: Message, key: str, reply_markup=None) -> None:
                              reply_markup=reply_markup, link_preview_options=NO_PREVIEW)
 
 
+def _validate_phone(text: str) -> str | None:
+    """Returns cleaned phone string or None if invalid."""
+    digits = "".join(c for c in text if c.isdigit())
+    if len(digits) < 10:
+        return None
+    return text.strip()
+
+
 # ─── /start ───────────────────────────────────────────────────────────────────
 
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext) -> None:
     await state.clear()
-    async with async_session() as session:
-        result = await session.execute(
-            select(Client).where(Client.telegram_id == message.from_user.id)
-        )
-        if not result.scalar_one_or_none():
-            session.add(Client(telegram_id=message.from_user.id,
-                               username=message.from_user.username))
-            await session.commit()
+    await get_or_create_client(message.from_user.id, message.from_user.username)
     await send_section(message, "welcome", reply_markup=main_menu())
+
+
+# ─── /cancel ──────────────────────────────────────────────────────────────────
+
+@router.message(Command("cancel"))
+async def cmd_cancel(message: Message, state: FSMContext) -> None:
+    current = await state.get_state()
+    await state.clear()
+    if current:
+        await message.answer("❌ Действие отменено. Выберите раздел 👇",
+                             reply_markup=main_menu(), link_preview_options=NO_PREVIEW)
+    else:
+        await message.answer("Выберите раздел 👇",
+                             reply_markup=main_menu(), link_preview_options=NO_PREVIEW)
 
 
 # ─── BOOKING FLOW ─────────────────────────────────────────────────────────────
 
-async def _start_booking(msg: Message, state: FSMContext) -> None:
+async def _start_booking(msg: Message, state: FSMContext, lead_type: str = "booking") -> None:
     await state.clear()
+    await state.update_data(lead_type=lead_type)
     await state.set_state(BookingForm.name)
-    await send_section(msg, "booking")
+    section_key = "booking" if lead_type == "booking" else "free"
+    await send_section(msg, section_key)
     await msg.answer("👤 <b>Как вас зовут?</b>",
                      parse_mode="HTML", reply_markup=cancel_kb(),
                      link_preview_options=NO_PREVIEW)
@@ -81,18 +103,34 @@ async def _start_booking(msg: Message, state: FSMContext) -> None:
 
 @router.message(F.text.in_({"🏠 Забронировать студию", "🎬 Записать подкаст"}))
 async def booking_start_msg(message: Message, state: FSMContext) -> None:
-    await _start_booking(message, state)
+    await _start_booking(message, state, lead_type="booking")
 
 
 @router.callback_query(F.data == "go_booking")
 async def booking_start_cb(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
-    await _start_booking(callback.message, state)
+    await _start_booking(callback.message, state, lead_type="booking")
 
+
+# ─── FREE EPISODE ─────────────────────────────────────────────────────────────
+
+@router.message(F.text == "🔥 Первый выпуск бесплатно")
+async def show_free_episode(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await send_section(message, "free", reply_markup=free_episode_kb())
+
+
+@router.callback_query(F.data == "go_free_episode")
+async def start_free_cb(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    await _start_booking(callback.message, state, lead_type="free_episode")
+
+
+# ─── SHARED BOOKING STEPS ─────────────────────────────────────────────────────
 
 @router.message(BookingForm.name)
 async def booking_name(message: Message, state: FSMContext) -> None:
-    name = message.text.strip()
+    name = message.text.strip() if message.text else ""
     if len(name) < 2:
         await message.answer("⚠️ Введите имя (минимум 2 символа).")
         return
@@ -109,7 +147,7 @@ async def booking_content_type(callback: CallbackQuery, state: FSMContext) -> No
     await state.update_data(content_type=content)
     await state.set_state(BookingForm.date)
     await callback.message.edit_text(
-        f"✅ {content}\n\n📅 <b>Выберите желаемую дату съёмок:</b>",
+        f"✅ {content}\n\n📅 <b>Выберите желаемую дату:</b>",
         parse_mode="HTML", reply_markup=dates_kb())
     await callback.answer()
 
@@ -121,14 +159,14 @@ async def booking_date(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(BookingForm.time)
     blocked = await get_booked_hours(chosen_date)
     await callback.message.edit_text(
-        f"✅ {chosen_date}\n\n🕐 <b>Выберите время начала съёмок:</b>",
+        f"✅ {chosen_date}\n\n🕐 <b>Выберите время начала:</b>",
         parse_mode="HTML", reply_markup=times_kb(blocked))
     await callback.answer()
 
 
 @router.callback_query(BookingForm.time, F.data == "no_slots")
 async def booking_no_slots(callback: CallbackQuery) -> None:
-    await callback.answer("На эту дату нет свободных слотов. Выберите другую дату.", show_alert=True)
+    await callback.answer("На эту дату нет свободных слотов. Выберите другую.", show_alert=True)
 
 
 @router.callback_query(BookingForm.time, F.data.startswith("btime:"))
@@ -145,45 +183,73 @@ async def booking_time(callback: CallbackQuery, state: FSMContext) -> None:
 @router.callback_query(BookingForm.hours, F.data.startswith("bhours:"))
 async def booking_hours(callback: CallbackQuery, state: FSMContext) -> None:
     hours = callback.data.split(":", 1)[1]
-    await state.update_data(hours=hours)
+    await state.update_data(hours=int(hours))
     await state.set_state(BookingForm.phone)
-    await callback.message.edit_text(
-        f"✅ {hours} ч\n\n📱 <b>Укажите ваш номер телефона:</b>",
-        parse_mode="HTML", reply_markup=cancel_kb())
+    # Switch to Reply keyboard for native phone sharing
+    await callback.message.answer(
+        f"✅ {hours} ч\n\n📱 <b>Укажите ваш номер телефона:</b>\n"
+        "└ Нажмите кнопку ниже или введите вручную",
+        parse_mode="HTML",
+        reply_markup=phone_request_kb(),
+        link_preview_options=NO_PREVIEW,
+    )
     await callback.answer()
 
 
-@router.message(BookingForm.phone)
-async def booking_phone(message: Message, state: FSMContext) -> None:
-    phone = message.text.strip()
-    await state.update_data(phone=phone)
+# Phone via native Telegram contact button
+@router.message(BookingForm.phone, F.contact)
+async def booking_phone_contact(message: Message, state: FSMContext) -> None:
+    phone = message.contact.phone_number
+    if not phone.startswith("+"):
+        phone = "+" + phone
+    await _finish_booking(message, state, phone)
+
+
+# Phone via manual text input
+@router.message(BookingForm.phone, F.text)
+async def booking_phone_text(message: Message, state: FSMContext) -> None:
+    if message.text == "❌ Отмена":
+        await state.clear()
+        await message.answer("❌ Действие отменено.", reply_markup=main_menu(),
+                             link_preview_options=NO_PREVIEW)
+        return
+    phone = _validate_phone(message.text)
+    if not phone:
+        await message.answer(
+            "⚠️ Номер не распознан. Введите в формате <b>+7 999 123-45-67</b> "
+            "или нажмите кнопку «📱 Поделиться номером».",
+            parse_mode="HTML")
+        return
+    await _finish_booking(message, state, phone)
+
+
+async def _finish_booking(message: Message, state: FSMContext, phone: str) -> None:
     data = await state.get_data()
     await state.clear()
 
-    tg_id    = message.from_user.id
-    username = message.from_user.username
-    hours_int = int(data.get("hours", 1))
+    tg_id     = message.from_user.id
+    username  = message.from_user.username
+    lead_type = data.get("lead_type", "booking")
+    hours_int = data.get("hours", 1)
 
-    async with async_session() as session:
-        result = await session.execute(select(Client).where(Client.telegram_id == tg_id))
-        client = result.scalar_one_or_none()
-        fields = dict(
-            name=data.get("name"), phone=phone,
-            service=data.get("content_type"),
-            booking_date=data.get("date"),
-            booking_time=data.get("time"),
-            booking_hours=hours_int,
-            status="new_request", lead_type="booking",
-        )
-        if client:
-            for k, v in fields.items():
-                setattr(client, k, v)
-        else:
-            session.add(Client(telegram_id=tg_id, username=username, **fields))
-        await session.commit()
+    # Upsert client profile
+    client = await get_or_create_client(tg_id, username)
+    client = await update_client_profile(tg_id, data.get("name", ""), phone)
+
+    # Create a new Booking record (not overwrite)
+    booking = await create_booking(client.id, {
+        "lead_type":    lead_type,
+        "content_type": data.get("content_type"),
+        "date":         data.get("date"),
+        "time":         data.get("time"),
+        "hours":        hours_int,
+    })
+
+    icon = "🔥" if lead_type == "free_episode" else "📋"
+    tag  = "Бесплатный выпуск" if lead_type == "free_episode" else "Бронирование"
 
     summary = (
-        "📋 <b>Ваша заявка принята!</b>\n\n"
+        f"{icon} <b>Ваша заявка принята!</b>\n\n"
         f"├ 👤 Имя: <b>{data.get('name')}</b>\n"
         f"├ 📱 Телефон: <b>{phone}</b>\n"
         f"├ 🎬 Контент: <b>{data.get('content_type')}</b>\n"
@@ -197,13 +263,14 @@ async def booking_phone(message: Message, state: FSMContext) -> None:
                          reply_markup=main_menu(), link_preview_options=NO_PREVIEW)
 
     admin_text = (
-        "🔥 <b>Новая заявка на съёмку</b>\n"
+        f"{'🔥' if lead_type == 'free_episode' else '🆕'} <b>Новая заявка — {tag}</b>\n"
         f"├ 👤 {data.get('name')}\n"
         f"├ 📱 {phone}\n"
         f"├ 🎬 {data.get('content_type')}\n"
         f"├ 📅 {data.get('date')} в {data.get('time')}\n"
         f"├ ⏱ {hours_int} ч\n"
-        f"└ 📱 @{username or '—'} · <code>{tg_id}</code>"
+        f"├ 🪪 @{username or '—'} · <code>{tg_id}</code>\n"
+        f"└ #заявка_{booking.id}"
     )
     try:
         await message.bot.send_message(ADMIN_ID, admin_text, parse_mode="HTML",
@@ -228,172 +295,27 @@ async def show_address(message: Message, state: FSMContext) -> None:
     await send_section(message, "address", reply_markup=main_menu())
 
 
-# ─── FREE EPISODE — same booking mechanics ───────────────────────────────────
-
-async def _start_free(msg: Message, state: FSMContext) -> None:
-    await state.clear()
-    await state.set_state(FreeEpisodeForm.name)
-    await send_section(msg, "free")
-    await msg.answer("👤 <b>Как вас зовут?</b>",
-                     parse_mode="HTML", reply_markup=cancel_kb(),
-                     link_preview_options=NO_PREVIEW)
-
-
-@router.message(F.text == "🔥 Первый выпуск бесплатно")
-async def show_free_episode(message: Message, state: FSMContext) -> None:
-    await send_section(message, "free", reply_markup=free_episode_kb())
-
-
-@router.callback_query(F.data == "go_free_episode")
-async def start_free_cb(callback: CallbackQuery, state: FSMContext) -> None:
-    await callback.answer()
-    await _start_free(callback.message, state)
-
-
-@router.message(FreeEpisodeForm.name)
-async def free_name(message: Message, state: FSMContext) -> None:
-    name = message.text.strip()
-    if len(name) < 2:
-        await message.answer("⚠️ Введите имя (минимум 2 символа).")
-        return
-    await state.update_data(name=name)
-    await state.set_state(FreeEpisodeForm.content_type)
-    await message.answer("🎬 <b>Какой контент хотите снимать?</b>",
-                         parse_mode="HTML", reply_markup=content_type_kb(),
-                         link_preview_options=NO_PREVIEW)
-
-
-@router.callback_query(FreeEpisodeForm.content_type, F.data.startswith("ctype:"))
-async def free_content_type(callback: CallbackQuery, state: FSMContext) -> None:
-    content = callback.data.split(":", 1)[1]
-    await state.update_data(content_type=content)
-    await state.set_state(FreeEpisodeForm.date)
-    await callback.message.edit_text(
-        f"✅ {content}\n\n📅 <b>Выберите желаемую дату съёмок:</b>",
-        parse_mode="HTML", reply_markup=dates_kb())
-    await callback.answer()
-
-
-@router.callback_query(FreeEpisodeForm.date, F.data.startswith("bdate:"))
-async def free_date(callback: CallbackQuery, state: FSMContext) -> None:
-    chosen_date = callback.data.split(":", 1)[1]
-    await state.update_data(date=chosen_date)
-    await state.set_state(FreeEpisodeForm.time)
-    blocked = await get_booked_hours(chosen_date)
-    await callback.message.edit_text(
-        f"✅ {chosen_date}\n\n🕐 <b>Выберите время начала съёмок:</b>",
-        parse_mode="HTML", reply_markup=times_kb(blocked))
-    await callback.answer()
-
-
-@router.callback_query(FreeEpisodeForm.time, F.data == "no_slots")
-async def free_no_slots(callback: CallbackQuery) -> None:
-    await callback.answer("На эту дату нет свободных слотов. Выберите другую дату.", show_alert=True)
-
-
-@router.callback_query(FreeEpisodeForm.time, F.data.startswith("btime:"))
-async def free_time(callback: CallbackQuery, state: FSMContext) -> None:
-    chosen_time = callback.data.split("btime:", 1)[1]
-    await state.update_data(time=chosen_time)
-    await state.set_state(FreeEpisodeForm.hours)
-    await callback.message.edit_text(
-        f"✅ {chosen_time}\n\n⏱ <b>Сколько часов нужна студия?</b>",
-        parse_mode="HTML", reply_markup=hours_kb())
-    await callback.answer()
-
-
-@router.callback_query(FreeEpisodeForm.hours, F.data.startswith("bhours:"))
-async def free_hours(callback: CallbackQuery, state: FSMContext) -> None:
-    hours = callback.data.split(":", 1)[1]
-    await state.update_data(hours=hours)
-    await state.set_state(FreeEpisodeForm.phone)
-    await callback.message.edit_text(
-        f"✅ {hours} ч\n\n📱 <b>Укажите ваш номер телефона:</b>",
-        parse_mode="HTML", reply_markup=cancel_kb())
-    await callback.answer()
-
-
-@router.message(FreeEpisodeForm.phone)
-async def free_phone(message: Message, state: FSMContext) -> None:
-    phone = message.text.strip()
-    await state.update_data(phone=phone)
-    data = await state.get_data()
-    await state.clear()
-
-    tg_id    = message.from_user.id
-    username = message.from_user.username
-    hours_int = int(data.get("hours", 1))
-
-    async with async_session() as session:
-        result = await session.execute(select(Client).where(Client.telegram_id == tg_id))
-        client = result.scalar_one_or_none()
-        fields = dict(
-            name=data.get("name"), phone=phone,
-            service=data.get("content_type"),
-            booking_date=data.get("date"),
-            booking_time=data.get("time"),
-            booking_hours=hours_int,
-            status="lead", lead_type="free_episode",
-        )
-        if client:
-            for k, v in fields.items():
-                setattr(client, k, v)
-        else:
-            session.add(Client(telegram_id=tg_id, username=username, **fields))
-        await session.commit()
-
-    summary = (
-        "📋 <b>Ваша заявка</b>\n"
-        f"├ 👤 Имя: <b>{data.get('name')}</b>\n"
-        f"├ 📱 Телефон: <b>{phone}</b>\n"
-        f"├ 🎬 Контент: <b>{data.get('content_type')}</b>\n"
-        f"├ 📅 Дата: <b>{data.get('date')}</b>\n"
-        f"├ 🕐 Время: <b>{data.get('time')}</b>\n"
-        f"└ ⏱ Длительность: <b>{hours_int} ч</b>\n\n"
-        "✅ <b>Спасибо за заявку!</b>\n"
-        "└ Свяжемся с вами для подтверждения 🎙"
-    )
-    await message.answer(summary, parse_mode="HTML",
-                         reply_markup=main_menu(), link_preview_options=NO_PREVIEW)
-
-    admin_text = (
-        "🔥 <b>Лид — Первый выпуск бесплатно</b>\n"
-        f"├ 👤 {data.get('name')}\n"
-        f"├ 📱 {phone}\n"
-        f"├ 🎬 {data.get('content_type')}\n"
-        f"├ 📅 {data.get('date')} в {data.get('time')}\n"
-        f"├ ⏱ {hours_int} ч\n"
-        f"└ 📱 @{username or '—'} · <code>{tg_id}</code>"
-    )
-    try:
-        await message.bot.send_message(ADMIN_ID, admin_text, parse_mode="HTML",
-                                       link_preview_options=NO_PREVIEW)
-    except Exception as e:
-        logger.error(f"Admin notify failed: {e}")
-
-
-# ─── CANCEL ───────────────────────────────────────────────────────────────────
+# ─── CANCEL INLINE ────────────────────────────────────────────────────────────
 
 @router.callback_query(F.data == "cancel")
 async def cancel_action(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
-    await callback.message.edit_text("❌ Действие отменено")
+    try:
+        await callback.message.edit_text("❌ Действие отменено")
+    except Exception:
+        pass
     await callback.message.answer("Выберите раздел меню 👇",
                                   reply_markup=main_menu(),
                                   link_preview_options=NO_PREVIEW)
     await callback.answer()
 
 
-# ─── CATCH-ALL (старые кнопки / неизвестный текст) ───────────────────────────
+# ─── CATCH-ALL ────────────────────────────────────────────────────────────────
 
 @router.message()
 async def fallback_handler(message: Message, state: FSMContext) -> None:
-    """Сбрасывает состояние и возвращает главное меню на любой нераспознанный текст."""
     current = await state.get_state()
     if current is not None:
-        return  # пользователь внутри формы — не перебиваем
-    await message.answer(
-        "Выберите раздел 👇",
-        reply_markup=main_menu(),
-        link_preview_options=NO_PREVIEW,
-    )
+        return  # inside a form — don't interrupt
+    await message.answer("Выберите раздел 👇",
+                         reply_markup=main_menu(), link_preview_options=NO_PREVIEW)
