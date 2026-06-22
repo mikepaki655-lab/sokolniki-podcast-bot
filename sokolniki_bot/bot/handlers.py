@@ -17,7 +17,7 @@ from bot.states import BookingForm
 from config import ADMIN_ID
 from database.db import (
     async_session, create_booking, get_booked_hours,
-    get_content, get_or_create_client, update_client_profile,
+    get_content, get_or_create_client,
 )
 from database.models import Client
 
@@ -219,12 +219,13 @@ async def _finish_booking(message: Message, state: FSMContext, phone: str) -> No
     lead_type = data.get("lead_type", "booking")
     hours_int = data.get("hours", 1)
 
-    # Upsert client profile
+    # Ensure client record exists (tracks Telegram identity only)
     client = await get_or_create_client(tg_id, username)
-    client = await update_client_profile(tg_id, data.get("name", ""), phone)
 
-    # Create a new Booking record (not overwrite)
+    # Create booking with the name/phone entered THIS time — never overwrites other bookings
     booking = await create_booking(client.id, {
+        "name":         data.get("name", ""),
+        "phone":        phone,
         "lead_type":    lead_type,
         "content_type": data.get("content_type"),
         "date":         data.get("date"),
