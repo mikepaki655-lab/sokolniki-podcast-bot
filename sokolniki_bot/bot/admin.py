@@ -20,7 +20,7 @@ from database.db import (
     add_admin_username, async_session, delete_booking, get_all_admin_usernames,
     get_all_content, get_analytics, get_booking_with_client, get_bookings_by_status,
     get_content, get_or_create_client, remove_admin_username, reset_content_to_defaults,
-    update_booking_status, update_content_photo, update_content_text,
+    update_admin_telegram_id, update_booking_status, update_content_photo, update_content_text,
 )
 from database.models import Booking, Client
 
@@ -100,6 +100,11 @@ async def cmd_admin(message: Message, state: FSMContext) -> None:
         await message.answer(
             "😔 К сожалению, у вас нет доступа к админ-панели студии.")
         return
+    # Persist telegram_id for extra admins so they can receive notifications
+    if message.from_user.id != ADMIN_ID and message.from_user.username:
+        await update_admin_telegram_id(
+            message.from_user.username, message.from_user.id
+        )
     await state.clear()
     await message.answer(
         "🎛 <b>Панель управления</b>\n└ Выберите раздел:",
