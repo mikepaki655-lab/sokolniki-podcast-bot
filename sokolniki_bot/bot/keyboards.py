@@ -334,3 +334,128 @@ def slot_conflict_kb(available_hours: int) -> InlineKeyboardMarkup:
     builder.button(text="📅 Другая дата",  callback_data="back_to_date")
     builder.adjust(1)
     return builder.as_markup()
+
+
+# ─── АНАЛИТИКА ────────────────────────────────────────────────────────────────
+
+import calendar as _cal_mod
+from datetime import date as _date_cls
+
+MONTHS_FULL_RU = {
+    1: "Январь",   2: "Февраль",  3: "Март",
+    4: "Апрель",   5: "Май",      6: "Июнь",
+    7: "Июль",     8: "Август",   9: "Сентябрь",
+    10: "Октябрь", 11: "Ноябрь", 12: "Декабрь",
+}
+MONTHS_GEN_RU = {
+    1: "январь",   2: "февраль",  3: "март",
+    4: "апрель",   5: "май",      6: "июнь",
+    7: "июль",     8: "август",   9: "сентябрь",
+    10: "октябрь", 11: "ноябрь", 12: "декабрь",
+}
+
+
+def calc_month_weeks(
+    year: int, month: int, today: _date_cls
+) -> list[tuple[_date_cls, _date_cls]]:
+    """Calendar Mon–Sun weeks within the month, clamped to month boundaries.
+    Only returns weeks where the clamped week-start <= today."""
+    _, last_day = _cal_mod.monthrange(year, month)
+    m_start = _date_cls(year, month, 1)
+    m_end   = _date_cls(year, month, last_day)
+    first_monday = m_start - timedelta(days=m_start.weekday())
+    weeks: list[tuple[_date_cls, _date_cls]] = []
+    cur = first_monday
+    while cur <= m_end:
+        ws = max(cur, m_start)
+        we = min(cur + timedelta(days=6), m_end)
+        if ws <= today:
+            weeks.append((ws, we))
+        cur += timedelta(days=7)
+    return weeks
+
+
+def analytics_main_kb() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="📅 По месяцам",    callback_data="an:months")
+    builder.button(text="📆 Задать период", callback_data="an:custom")
+    builder.adjust(2)
+    return builder.as_markup()
+
+
+def analytics_months_kb(months: list[tuple[int, int]]) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for year, month in reversed(months):
+        builder.button(
+            text=f"{MONTHS_FULL_RU[month]} {year}",
+            callback_data=f"an:month:{year}:{month}",
+        )
+    builder.button(text="◀️ Назад", callback_data="an:back")
+    n = len(months)
+    layout = [2] * (n // 2) + ([1] if n % 2 else []) + [1]
+    builder.adjust(*layout)
+    return builder.as_markup()
+
+
+def analytics_weeks_kb(
+    year: int, month: int, weeks: list[tuple[_date_cls, _date_cls]]
+) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for ws, we in weeks:
+        builder.button(
+            text=f"{ws.strftime('%d.%m')} — {we.strftime('%d.%m')}",
+            callback_data=f"an:week:{ws.strftime('%Y%m%d')}:{we.strftime('%Y%m%d')}",
+        )
+    _, last = _cal_mod.monthrange(year, month)
+    m_start = _date_cls(year, month, 1)
+    m_end   = _date_cls(year, month, last)
+    builder.button(
+        text=f"📅 За весь {MONTHS_GEN_RU[month]}",
+        callback_data=f"an:week:{m_start.strftime('%Y%m%d')}:{m_end.strftime('%Y%m%d')}",
+    )
+    builder.button(text="◀️ К месяцам", callback_data="an:months")
+    n = len(weeks)
+    layout = [2] * (n // 2) + ([1] if n % 2 else []) + [1, 1]
+    builder.adjust(*layout)
+    return builder.as_markup()
+
+
+def analytics_calendar_kb(
+    year: int,
+    month: int,
+    phase: str,
+    start: _date_cls | None,
+    today: _date_cls,
+) -> InlineKeyboardMarkup:
+    """Inline calendar grid. phase='start'|'end'. start=already-picked start date."""
+    builder = InlineKeyboardBuilder()
+    # ── Navigation ─────────────────────────────────────────────────────────
+    py, pm = (year - 1, 12) if month == 1  else (year, month - 1)
+    ny, nm = (year + 1, 1)  if month == 12 else (year, month + 1)
+    builder.button(text="◀️",                              callback_data=f"acal:nav:{py}:{pm}")
+    builder.button(text=f"{MONTHS_FULL_RU[month]} {year}", callback_data="acal:no")
+    builder.button(text="▶️",                              callback_data=f"acal:nav:{ny}:{nm}")
+    # ── Weekday headers ─────────────────────────────────────────────────────
+    for wd in ("Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"):
+        builder.button(text=wd, callback_data="acal:no")
+    # ── Day grid ────────────────────────────────────────────────────────────
+    cal_weeks = _cal_mod.monthcalendar(year, month)
+    for week in cal_weeks:
+        for day_num in week:
+            if day_num == 0:
+                builder.button(text=" ", callback_data="acal:no")
+                continue
+            d = _date_cls(year, month, day_num)
+            if d == start and phase == "end":
+                text, cb = f"✅{day_num}", f"acal:d:{d.strftime('%Y%m%d')}"
+            elif d > today:
+                text, cb = "·", "acal:no"
+            elif phase == "end" and start and d < start:
+                text, cb = "·", "acal:no"
+            else:
+                text, cb = str(day_num), f"acal:d:{d.strftime('%Y%m%d')}"
+            builder.button(text=text, callback_data=cb)
+    # ── Cancel ──────────────────────────────────────────────────────────────
+    builder.button(text="❌ Отмена", callback_data="acal:cancel")
+    builder.adjust(3, 7, *([7] * len(cal_weeks)), 1)
+    return builder.as_markup()
