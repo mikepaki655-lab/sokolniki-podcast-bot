@@ -94,7 +94,38 @@ def _migrate(conn):
     inspector = sa.inspect(conn)
     tables = inspector.get_table_names()
 
-    # Add missing columns to bookings
+    # ── Rebuild clients table if it has legacy NOT-NULL columns ───────────────
+    # Old schema had status/booking_date/etc. columns that are NOT NULL but have
+    # no default, which causes every new client INSERT to fail with IntegrityError.
+    if "clients" in tables:
+        client_cols = {c["name"] for c in inspector.get_columns("clients")}
+        if "status" in client_cols:   # legacy schema present
+            conn.execute(sa.text("PRAGMA foreign_keys = OFF"))
+            conn.execute(sa.text("""
+                CREATE TABLE IF NOT EXISTS clients_clean (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    telegram_id BIGINT  NOT NULL UNIQUE,
+                    username    VARCHAR(100),
+                    name        VARCHAR(200),
+                    phone       VARCHAR(50),
+                    created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+            """))
+            conn.execute(sa.text("""
+                INSERT OR IGNORE INTO clients_clean
+                    (id, telegram_id, username, name, phone, created_at)
+                SELECT id, telegram_id, username, name,
+                       phone, COALESCE(created_at, CURRENT_TIMESTAMP)
+                FROM clients
+            """))
+            conn.execute(sa.text("DROP TABLE clients"))
+            conn.execute(sa.text("ALTER TABLE clients_clean RENAME TO clients"))
+            conn.execute(sa.text("PRAGMA foreign_keys = ON"))
+            # Refresh inspector after table rebuild
+            inspector = sa.inspect(conn)
+            tables = inspector.get_table_names()
+
+    # ── Add missing columns to bookings ───────────────────────────────────────
     if "bookings" in tables:
         existing = {c["name"] for c in inspector.get_columns("bookings")}
         if "reminded" not in existing:
@@ -103,7 +134,7 @@ def _migrate(conn):
             conn.execute(sa.text("ALTER TABLE bookings ADD COLUMN guest_name TEXT"))
         if "guest_phone" not in existing:
             conn.execute(sa.text("ALTER TABLE bookings ADD COLUMN guest_phone TEXT"))
-        # Backfill existing rows from client profile (best-effort, won't overwrite real data)
+        # Backfill existing rows from client profile (best-effort)
         conn.execute(sa.text(
             "UPDATE bookings SET "
             "guest_name  = (SELECT name  FROM clients WHERE clients.id = bookings.client_id), "
@@ -111,7 +142,7 @@ def _migrate(conn):
             "WHERE guest_name IS NULL OR guest_phone IS NULL"
         ))
 
-    # Migrate legacy booking data from clients → bookings (one-time)
+    # ── Migrate legacy booking data from clients → bookings (one-time) ────────
     if "clients" in tables and "bookings" in tables:
         legacy_cols = {c["name"] for c in inspector.get_columns("clients")}
         has_legacy = "booking_date" in legacy_cols and "booking_hours" in legacy_cols
