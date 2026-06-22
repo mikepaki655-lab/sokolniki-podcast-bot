@@ -44,11 +44,6 @@ STATUS_LABELS = {
 }
 
 CLIENT_MESSAGES = {
-    "confirmed": (
-        "✅ <b>Ваша бронь подтверждена!</b>\n\n"
-        "└ Ждём вас в студии «Сокольники» 🎙\n"
-        "   г. Москва, Песочный пер., дом 3"
-    ),
     "recorded": (
         "🎬 <b>Спасибо за визит!</b>\n\n"
         "└ Ваш выпуск в работе — скоро пришлём результат 🎉"
@@ -58,6 +53,25 @@ CLIENT_MESSAGES = {
         "└ Студия «Сокольники» рада сотрудничеству 🎙"
     ),
 }
+
+def _confirmed_message(booking) -> str:
+    """Build confirmation message with time range from booking data."""
+    time_line = ""
+    if booking.booking_time and booking.booking_hours:
+        try:
+            start_h = int(booking.booking_time.split(":")[0])
+            end_h   = start_h + booking.booking_hours
+            time_line = f"\n├ 📅 {booking.booking_date}\n└ 🕐 Время: с {start_h:02d}:00 до {end_h:02d}:00\n"
+        except Exception:
+            pass
+    return (
+        "✅ <b>Ваша бронь подтверждена!</b>\n"
+        f"{time_line}\n"
+        "📍 Ждём вас в студии «Сокольники»\n"
+        "└ г. Москва, Песочный пер., дом 3\n\n"
+        "⏰ <i>Рекомендуем прийти заранее (за 20–30 минут).</i>\n"
+        "☕️ Угостим вас вкусным кофе и подготовимся к съёмке."
+    )
 
 
 def is_admin(uid: int) -> bool:
@@ -181,7 +195,8 @@ async def view_booking(callback: CallbackQuery) -> None:
         f"├ Часов: {booking.booking_hours or '—'}\n"
         f"└ Создана: {created}\n\n"
         f"📋 <b>Статус:</b> {STATUS_LABELS.get(booking.status, booking.status)}"
-        f"{reschedule_note}{note_line}"
+        + (f" · оплатил {booking.payment_amount:,.0f} ₽" if booking.status == "done_paid" and booking.payment_amount else "")
+        + f"{reschedule_note}{note_line}"
     )
 
     if booking.status in NEW_STATUSES:
@@ -247,13 +262,18 @@ async def set_booking_status(callback: CallbackQuery, state: FSMContext) -> None
 
 async def _notify_client(callback, booking_id: int, new_status: str) -> None:
     """Send status notification to client if a message template exists."""
-    msg_text = CLIENT_MESSAGES.get(new_status)
-    if not msg_text:
-        return
     pair = await get_booking_with_client(booking_id)
     if not pair:
         return
     booking, client = pair
+
+    if new_status == "confirmed":
+        msg_text = _confirmed_message(booking)
+    else:
+        msg_text = CLIENT_MESSAGES.get(new_status)
+
+    if not msg_text:
+        return
     try:
         await callback.bot.send_message(
             client.telegram_id, msg_text,
@@ -297,10 +317,11 @@ async def admin_payment_hours(message: Message, state: FSMContext) -> None:
         payment_hours=hours,
     )
 
+    hours_int = int(hours)
     await message.answer(
         f"✅ <b>Завершена с оплатой</b>\n"
         f"├ Сумма: <b>{data['payment_amount']:,.0f} ₽</b>\n"
-        f"└ Часов: <b>{hours}</b>",
+        f"└ Часов: <b>{hours_int}</b>",
         parse_mode="HTML", link_preview_options=NO_PREVIEW)
 
     # Notify client
@@ -310,8 +331,9 @@ async def admin_payment_hours(message: Message, state: FSMContext) -> None:
         try:
             await message.bot.send_message(
                 client.telegram_id,
-                "✅ <b>Спасибо за оплату!</b>\n\n"
-                "Ваша бронь завершена. Ждём вас снова в студии «Сокольники» 🎙",
+                "✅ <b>Спасибо, что посетили нашу студию!</b>\n\n"
+                "Надеемся, вам у нас понравилось.\n"
+                "Будем рады видеть вас снова! 🫶🏼",
                 parse_mode="HTML", link_preview_options=NO_PREVIEW)
         except Exception:
             pass
