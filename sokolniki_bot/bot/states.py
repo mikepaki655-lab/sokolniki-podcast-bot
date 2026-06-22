@@ -23,7 +23,7 @@ class AdminAction(StatesGroup):
     no_pay_reason     = State()
     reschedule_reason = State()
     reschedule_date   = State()
-    reschedule_hours  = State()
+    reschedule_time   = State()   # renamed: was reschedule_hours, now collects start time
 
 
 class EditContentFSM(StatesGroup):
