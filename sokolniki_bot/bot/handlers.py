@@ -24,6 +24,7 @@ from database.db import (
     async_session, cancel_booking, create_booking, get_booked_hours,
     get_client_bookings, get_booking_with_client, get_max_available_hours,
     get_content, get_or_create_client, reschedule_client_booking,
+    update_content_photo,
 )
 from database.models import Client
 
@@ -57,30 +58,52 @@ DONE_CLIENT_STATUSES = {"done_paid"}
 # ─── UTILS ────────────────────────────────────────────────────────────────────
 
 async def send_section(message: Message, key: str, reply_markup=None) -> None:
+    """Send a content section as a single post: photo+caption when image available,
+    text-only otherwise. Caches the Telegram file_id after the first local-file upload
+    so every subsequent call is instant (no disk read / re-upload)."""
     section = await get_content(key)
     if not section:
         return
-    photo_sent = False
+
+    # ── Try cached file_id (instant round-trip with Telegram) ──────────────────
     if section.photo_file_id:
         try:
             await message.answer_photo(
-                photo=section.photo_file_id, caption=section.text,
-                parse_mode="HTML", reply_markup=reply_markup,
+                photo=section.photo_file_id,
+                caption=section.text,
+                parse_mode="HTML",
+                reply_markup=reply_markup,
             )
-            photo_sent = True
+            return
         except Exception:
-            pass
-    if not photo_sent and section.local_banner:
+            # Stale file_id — clear it so we re-upload below
+            await update_content_photo(key, "")
+
+    # ── Upload from local banner file and cache the returned file_id ────────────
+    if section.local_banner:
         path = os.path.join(IMAGES_DIR, section.local_banner)
         if os.path.exists(path):
-            await message.answer_photo(
-                photo=FSInputFile(path), caption=section.text,
-                parse_mode="HTML", reply_markup=reply_markup,
-            )
-            photo_sent = True
-    if not photo_sent:
-        await message.answer(section.text, parse_mode="HTML",
-                             reply_markup=reply_markup, link_preview_options=NO_PREVIEW)
+            try:
+                sent = await message.answer_photo(
+                    photo=FSInputFile(path),
+                    caption=section.text,
+                    parse_mode="HTML",
+                    reply_markup=reply_markup,
+                )
+                # Persist file_id — all future calls use it directly
+                if sent.photo:
+                    await update_content_photo(key, sent.photo[-1].file_id)
+                return
+            except Exception:
+                pass
+
+    # ── Fallback: text only ─────────────────────────────────────────────────────
+    await message.answer(
+        section.text,
+        parse_mode="HTML",
+        reply_markup=reply_markup,
+        link_preview_options=NO_PREVIEW,
+    )
 
 
 def _validate_phone(text: str) -> str | None:
@@ -113,39 +136,8 @@ def _is_today(date_str: str) -> bool:
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext) -> None:
     await state.clear()
-
-    # 1. Register client (fast local DB write)
     await get_or_create_client(message.from_user.id, message.from_user.username)
-
-    # 2. Fetch welcome content — if DB is slow or section missing, fall back instantly
-    section = await get_content("welcome")
-    welcome_text = (section.text if section else
-                    "🎙 <b>Студия «Сокольники»</b>\n\nВыберите раздел 👇")
-
-    # 3. Send main menu immediately (text-only — no image upload delay)
-    await message.answer(
-        welcome_text,
-        parse_mode="HTML",
-        reply_markup=main_menu(),
-        link_preview_options=NO_PREVIEW,
-    )
-
-    # 4. Send banner photo as a follow-up (non-blocking from user's perspective)
-    if section:
-        photo_sent = False
-        if section.photo_file_id:
-            try:
-                await message.answer_photo(photo=section.photo_file_id)
-                photo_sent = True
-            except Exception:
-                pass
-        if not photo_sent and section.local_banner:
-            path = os.path.join(IMAGES_DIR, section.local_banner)
-            if os.path.exists(path):
-                try:
-                    await message.answer_photo(photo=FSInputFile(path))
-                except Exception:
-                    pass
+    await send_section(message, "welcome", reply_markup=main_menu())
 
 
 # ─── /cancel ──────────────────────────────────────────────────────────────────
