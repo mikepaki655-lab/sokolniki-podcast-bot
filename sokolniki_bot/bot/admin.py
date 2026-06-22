@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from aiogram import F, Router
 from aiogram.filters import Command
@@ -9,18 +9,22 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy import distinct
 
 from bot.keyboards import (
+    MONTHS_FULL_RU, MONTHS_GEN_RU,
     admin_bookings_menu, admin_broadcast_menu, admin_main_menu,
-    broadcast_confirm_kb, confirm_delete_booking_kb, content_back_to_section_kb,
+    analytics_calendar_kb, analytics_main_kb, analytics_months_kb,
+    analytics_weeks_kb, broadcast_confirm_kb, calc_month_weeks,
+    confirm_delete_booking_kb, content_back_to_section_kb,
     content_edit_kb, content_sections_kb, done_booking_actions_kb, main_menu,
     manage_admins_kb, new_booking_actions_kb, processing_booking_actions_kb,
 )
-from bot.states import AdminAction, AdminManageState, BroadcastForm, EditContentFSM
+from bot.states import AdminAction, AdminManageState, AnalyticsState, BroadcastForm, EditContentFSM
 from config import ADMIN_ID
 from database.db import (
     add_admin_username, async_session, delete_booking, get_all_admin_usernames,
-    get_all_content, get_analytics, get_booking_with_client, get_bookings_by_status,
-    get_content, get_or_create_client, remove_admin_username, reset_content_to_defaults,
-    update_admin_telegram_id, update_booking_status, update_content_photo, update_content_text,
+    get_all_content, get_analytics_range, get_booking_months, get_booking_with_client,
+    get_bookings_by_status, get_content, get_or_create_client, remove_admin_username,
+    reset_content_to_defaults, update_admin_telegram_id, update_booking_status,
+    update_content_photo, update_content_text,
 )
 from database.models import Booking, Client
 
@@ -572,21 +576,239 @@ async def del_booking_execute(callback: CallbackQuery) -> None:
 
 # ─── АНАЛИТИКА ────────────────────────────────────────────────────────────────
 
-@router.message(F.text == "📊 Аналитика")
-async def admin_analytics(message: Message) -> None:
-    if not is_admin(message.from_user.id, message.from_user.username): return
+_MSK = timezone(timedelta(hours=3))
 
-    stats = await get_analytics(days=7)
 
-    await message.answer(
-        "📊 <b>Аналитика за 7 дней</b>\n"
-        "<i>(по дате съёмки)</i>\n\n"
-        f"├ 🆕 Новых заявок: <b>{stats['new']}</b>\n"
+def _today_msk() -> date:
+    return datetime.now(_MSK).date()
+
+
+def _fmt_date(d: date) -> str:
+    return d.strftime("%d.%m.%Y")
+
+
+def _parse_ymd(s: str) -> date:
+    return date(int(s[:4]), int(s[4:6]), int(s[6:8]))
+
+
+def _analytics_text(label: str, stats: dict) -> str:
+    total = stats["new"] + stats["proc"] + stats["done"]
+    return (
+        f"📊 <b>Аналитика за {label}</b>\n\n"
+        f"├ 📥 Всего заявок: <b>{total}</b>\n"
+        f"├ 🆕 Новые / лиды: <b>{stats['new']}</b>\n"
         f"├ ⚙️ В обработке: <b>{stats['proc']}</b>\n"
-        f"├ ✅ Завершено с оплатой: <b>{stats['done']}</b>\n"
+        f"├ ✅ Завершено (оплата): <b>{stats['done']}</b>\n"
         f"├ 💵 Выручка: <b>{stats['revenue']:,.0f} ₽</b>\n"
-        f"└ ⏱ Часов отработано: <b>{int(stats['hours'])} ч</b>",
-        parse_mode="HTML", link_preview_options=NO_PREVIEW)
+        f"└ ⏱ Часов отработано: <b>{int(stats['hours'])} ч</b>"
+    )
+
+
+# ── Entry point ──────────────────────────────────────────────────────────────
+
+@router.message(F.text == "📊 Аналитика")
+async def admin_analytics(message: Message, state: FSMContext) -> None:
+    if not is_admin(message.from_user.id, message.from_user.username):
+        return
+    await state.clear()
+    await message.answer(
+        "📊 <b>Аналитика</b>\n└ Выберите режим:",
+        parse_mode="HTML",
+        reply_markup=analytics_main_kb(),
+        link_preview_options=NO_PREVIEW,
+    )
+
+
+# ── Back to main analytics menu ───────────────────────────────────────────────
+
+@router.callback_query(F.data == "an:back")
+async def analytics_back_cb(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id, callback.from_user.username):
+        return await callback.answer()
+    await state.clear()
+    await callback.message.edit_text(
+        "📊 <b>Аналитика</b>\n└ Выберите режим:",
+        parse_mode="HTML",
+        reply_markup=analytics_main_kb(),
+    )
+    await callback.answer()
+
+
+# ── Month list ────────────────────────────────────────────────────────────────
+
+@router.callback_query(F.data == "an:months")
+async def analytics_months_cb(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id, callback.from_user.username):
+        return await callback.answer()
+    months = await get_booking_months()
+    if not months:
+        await callback.answer("Нет данных для отображения", show_alert=True)
+        return
+    await callback.message.edit_text(
+        "📊 <b>Аналитика — по месяцам</b>\n└ Выберите месяц:",
+        parse_mode="HTML",
+        reply_markup=analytics_months_kb(months),
+    )
+    await callback.answer()
+
+
+# ── Weeks for a month ─────────────────────────────────────────────────────────
+
+@router.callback_query(F.data.startswith("an:month:"))
+async def analytics_month_cb(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id, callback.from_user.username):
+        return await callback.answer()
+    _, _, year_s, month_s = callback.data.split(":")
+    year, month = int(year_s), int(month_s)
+    today = _today_msk()
+    weeks = calc_month_weeks(year, month, today)
+    await callback.message.edit_text(
+        f"📊 <b>{MONTHS_FULL_RU[month]} {year}</b>\n└ Выберите неделю:",
+        parse_mode="HTML",
+        reply_markup=analytics_weeks_kb(year, month, weeks),
+    )
+    await callback.answer()
+
+
+# ── Stats report for a date range ─────────────────────────────────────────────
+
+@router.callback_query(F.data.startswith("an:week:"))
+async def analytics_week_cb(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id, callback.from_user.username):
+        return await callback.answer()
+    parts = callback.data.split(":")   # ["an","week","YYYYMMDD","YYYYMMDD"]
+    from_date = _parse_ymd(parts[2])
+    to_date   = _parse_ymd(parts[3])
+    from_str, to_str = _fmt_date(from_date), _fmt_date(to_date)
+    stats = await get_analytics_range(from_str, to_str)
+    back = InlineKeyboardBuilder()
+    back.button(
+        text=f"◀️ К неделям {MONTHS_GEN_RU[from_date.month]} {from_date.year}",
+        callback_data=f"an:month:{from_date.year}:{from_date.month}",
+    )
+    back.button(text="◀️ К месяцам", callback_data="an:months")
+    back.adjust(1)
+    await callback.message.edit_text(
+        _analytics_text(f"{from_str} — {to_str}", stats),
+        parse_mode="HTML",
+        reply_markup=back.as_markup(),
+    )
+    await callback.answer()
+
+
+# ── Custom period: start calendar ─────────────────────────────────────────────
+
+@router.callback_query(F.data == "an:custom")
+async def analytics_custom_cb(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id, callback.from_user.username):
+        return await callback.answer()
+    today = _today_msk()
+    await state.set_state(AnalyticsState.pick_start)
+    await state.update_data(cal_year=today.year, cal_month=today.month, phase="start")
+    await callback.message.edit_text(
+        "📆 <b>Выберите начало периода:</b>",
+        parse_mode="HTML",
+        reply_markup=analytics_calendar_kb(today.year, today.month, "start", None, today),
+    )
+    await callback.answer()
+
+
+# ── Calendar: month navigation (works in both pick_start / pick_end) ──────────
+
+@router.callback_query(F.data.startswith("acal:nav:"))
+async def analytics_cal_nav_cb(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id, callback.from_user.username):
+        return await callback.answer()
+    _, _, year_s, month_s = callback.data.split(":")
+    year, month = int(year_s), int(month_s)
+    today = _today_msk()
+    data = await state.get_data()
+    phase = data.get("phase", "start")
+    start_iso = data.get("start_date")
+    start = date.fromisoformat(start_iso) if start_iso else None
+    await state.update_data(cal_year=year, cal_month=month)
+    prompt = (
+        f"📆 <b>Начало:</b> {_fmt_date(start)}\nВыберите <b>конец периода</b>:"
+        if phase == "end" and start
+        else "📆 <b>Выберите начало периода:</b>"
+    )
+    await callback.message.edit_text(
+        prompt,
+        parse_mode="HTML",
+        reply_markup=analytics_calendar_kb(year, month, phase, start, today),
+    )
+    await callback.answer()
+
+
+# ── Calendar: pick start date ─────────────────────────────────────────────────
+
+@router.callback_query(F.data.startswith("acal:d:"), AnalyticsState.pick_start)
+async def analytics_cal_pick_start(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id, callback.from_user.username):
+        return await callback.answer()
+    ymd = callback.data.split(":")[2]
+    picked = _parse_ymd(ymd)
+    today = _today_msk()
+    data = await state.get_data()
+    cal_year  = data.get("cal_year",  today.year)
+    cal_month = data.get("cal_month", today.month)
+    await state.set_state(AnalyticsState.pick_end)
+    await state.update_data(start_date=picked.isoformat(), phase="end")
+    await callback.message.edit_text(
+        f"📆 <b>Начало:</b> {_fmt_date(picked)}\nВыберите <b>конец периода</b>:",
+        parse_mode="HTML",
+        reply_markup=analytics_calendar_kb(cal_year, cal_month, "end", picked, today),
+    )
+    await callback.answer()
+
+
+# ── Calendar: pick end date ───────────────────────────────────────────────────
+
+@router.callback_query(F.data.startswith("acal:d:"), AnalyticsState.pick_end)
+async def analytics_cal_pick_end(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id, callback.from_user.username):
+        return await callback.answer()
+    ymd = callback.data.split(":")[2]
+    end = _parse_ymd(ymd)
+    today = _today_msk()
+    data = await state.get_data()
+    start_iso = data.get("start_date")
+    start = date.fromisoformat(start_iso) if start_iso else end
+    if end < start:
+        start, end = end, start
+    await state.clear()
+    from_str, to_str = _fmt_date(start), _fmt_date(end)
+    stats = await get_analytics_range(from_str, to_str)
+    back = InlineKeyboardBuilder()
+    back.button(text="🔄 Новый период",  callback_data="an:custom")
+    back.button(text="◀️ К аналитике",  callback_data="an:back")
+    back.adjust(1)
+    await callback.message.edit_text(
+        _analytics_text(f"{from_str} — {to_str}", stats),
+        parse_mode="HTML",
+        reply_markup=back.as_markup(),
+    )
+    await callback.answer()
+
+
+# ── Calendar: cancel / ignore inactive buttons ────────────────────────────────
+
+@router.callback_query(F.data == "acal:cancel")
+async def analytics_cal_cancel_cb(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id, callback.from_user.username):
+        return await callback.answer()
+    await state.clear()
+    await callback.message.edit_text(
+        "📊 <b>Аналитика</b>\n└ Выберите режим:",
+        parse_mode="HTML",
+        reply_markup=analytics_main_kb(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "acal:no")
+async def analytics_cal_noop_cb(callback: CallbackQuery) -> None:
+    await callback.answer()
 
 
 # ─── РАССЫЛКА ─────────────────────────────────────────────────────────────────
