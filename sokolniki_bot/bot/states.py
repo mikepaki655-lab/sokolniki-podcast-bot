@@ -38,3 +38,10 @@ class MyBookingsState(StatesGroup):
 class AdminManageState(StatesGroup):
     add_username    = State()
     remove_username = State()
+
+
+class ClientRescheduleState(StatesGroup):
+    date    = State()
+    time    = State()
+    hours   = State()
+    confirm = State()
