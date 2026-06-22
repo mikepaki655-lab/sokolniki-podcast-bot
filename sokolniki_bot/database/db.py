@@ -233,6 +233,23 @@ async def get_booked_hours(date_str: str) -> set[int]:
     return blocked
 
 
+async def get_max_available_hours(date: str, start_hour: int, requested_hours: int) -> int:
+    """How many hours are actually available at start_hour on date.
+
+    Returns requested_hours when there's no conflict.
+    Returns 0..N when existing bookings limit the slot (accounting for the +1 buffer rule).
+    """
+    blocked = await get_booked_hours(date)
+    first_conflict: int | None = None
+    for h in range(start_hour, start_hour + requested_hours + 1):
+        if h in blocked:
+            first_conflict = h
+            break
+    if first_conflict is None:
+        return requested_hours
+    return max(0, first_conflict - start_hour - 1)
+
+
 async def get_bookings_by_status(statuses: set[str], limit: int = 50) -> list[tuple[Booking, Client]]:
     async with async_session() as session:
         result = await session.execute(
