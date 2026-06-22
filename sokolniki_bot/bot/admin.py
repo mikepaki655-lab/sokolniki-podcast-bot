@@ -118,9 +118,11 @@ async def _show_bookings_list(message: Message, statuses: set, title: str) -> No
     for booking, client in pairs:
         name  = client.name or "—"
         d     = booking.booking_date or "?"
+        t     = booking.booking_time or ""
         badge = STATUS_LABELS.get(booking.status, booking.status)
         reschedule = f" ↩{booking.reschedule_from}" if booking.reschedule_from else ""
-        label = f"{name} · {d}{reschedule} · {badge}"
+        time_part  = f" {t}" if t else ""
+        label = f"#{booking.id} {name} · {d}{time_part}{reschedule} · {badge}"
         builder.button(text=label[:60], callback_data=f"view_booking:{booking.id}")
     builder.adjust(1)
 
