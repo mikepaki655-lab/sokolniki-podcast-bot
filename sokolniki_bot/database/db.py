@@ -491,6 +491,62 @@ async def get_analytics(days: int = 7) -> dict:
     }
 
 
+async def get_analytics_range(date_from: str, date_to: str) -> dict:
+    """Analytics for a date range. Dates in DD.MM.YYYY format."""
+    from sqlalchemy import func as sqlfunc
+
+    def _ymd(d: str) -> str:
+        return d[6:10] + d[3:5] + d[0:2]
+
+    date_filter = sa_text(
+        "booking_date IS NOT NULL "
+        "AND length(booking_date) = 10 "
+        "AND substr(booking_date,7,4)||substr(booking_date,4,2)||substr(booking_date,1,2) >= :from_d "
+        "AND substr(booking_date,7,4)||substr(booking_date,4,2)||substr(booking_date,1,2) <= :to_d"
+    ).bindparams(from_d=_ymd(date_from), to_d=_ymd(date_to))
+
+    async with async_session() as session:
+        new_q   = select(sqlfunc.count()).select_from(Booking).where(
+            Booking.status.in_({"new_request", "lead"}), date_filter)
+        proc_q  = select(sqlfunc.count()).select_from(Booking).where(
+            Booking.status.in_({"confirmed", "recorded", "paid", "done_no_pay"}), date_filter)
+        done_q  = select(sqlfunc.count()).select_from(Booking).where(
+            Booking.status == "done_paid", date_filter)
+        rev_q   = select(sqlfunc.sum(Booking.payment_amount)).select_from(Booking).where(
+            Booking.status == "done_paid", date_filter,
+            Booking.payment_amount.isnot(None))
+        hours_q = select(sqlfunc.sum(Booking.payment_hours)).select_from(Booking).where(
+            Booking.status == "done_paid", date_filter,
+            Booking.payment_hours.isnot(None))
+
+        new_cnt  = (await session.execute(new_q)).scalar_one()  or 0
+        proc_cnt = (await session.execute(proc_q)).scalar_one() or 0
+        done_cnt = (await session.execute(done_q)).scalar_one() or 0
+        revenue  = (await session.execute(rev_q)).scalar_one()  or 0
+        hours    = (await session.execute(hours_q)).scalar_one() or 0
+
+    return {"new": new_cnt, "proc": proc_cnt, "done": done_cnt,
+            "revenue": revenue, "hours": hours}
+
+
+async def get_booking_months() -> list[tuple[int, int]]:
+    """Returns sorted (year, month) tuples for months with at least one non-cancelled booking."""
+    async with async_session() as session:
+        result = await session.execute(
+            sa_text("""
+                SELECT DISTINCT
+                    CAST(substr(booking_date, 7, 4) AS INTEGER) AS year,
+                    CAST(substr(booking_date, 4, 2) AS INTEGER) AS month
+                FROM bookings
+                WHERE booking_date IS NOT NULL
+                  AND length(booking_date) = 10
+                  AND status NOT IN ('cancelled')
+                ORDER BY year ASC, month ASC
+            """)
+        )
+        return [(int(row[0]), int(row[1])) for row in result.all()]
+
+
 async def get_upcoming_bookings_for_reminder() -> list[tuple[Booking, Client]]:
     """Bookings happening in ~24h that haven't been reminded yet."""
     moscow = timezone(timedelta(hours=3))
