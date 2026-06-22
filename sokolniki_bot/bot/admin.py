@@ -116,7 +116,7 @@ async def _show_bookings_list(message: Message, statuses: set, title: str) -> No
 
     builder = InlineKeyboardBuilder()
     for booking, client in pairs:
-        name  = client.name or "—"
+        name  = booking.guest_name or client.name or "—"
         d     = booking.booking_date or "?"
         t     = booking.booking_time or ""
         badge = STATUS_LABELS.get(booking.status, booking.status)
@@ -170,10 +170,10 @@ async def view_booking(callback: CallbackQuery) -> None:
     lead_icon = "🔥" if booking.lead_type == "free_episode" else "📋"
 
     text = (
-        f"👤 <b>{client.name or 'Без имени'}</b> {lead_icon}\n\n"
+        f"👤 <b>{booking.guest_name or client.name or 'Без имени'}</b> {lead_icon}\n\n"
         f"🪪 <b>Контакты</b>\n"
         f"├ Telegram: {tg}\n"
-        f"└ Телефон: {client.phone or '—'}\n\n"
+        f"└ Телефон: {booking.guest_phone or client.phone or '—'}\n\n"
         f"🎬 <b>Заявка #{booking.id}</b>\n"
         f"├ Контент: {booking.content_type or '—'}\n"
         f"├ Дата: {booking.booking_date or '—'}\n"
