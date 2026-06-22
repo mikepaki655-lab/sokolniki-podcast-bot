@@ -313,24 +313,29 @@ async def delete_booking(booking_id: int) -> bool:
         return False
 
 
-async def get_booked_hours(date_str: str) -> set[int]:
+async def get_booked_hours(
+    date_str: str,
+    exclude_booking_id: int | None = None,
+) -> set[int]:
     """Return blocked hour-ints for a date (booking duration + 1 buffer hour).
-    Slots are freed only when booking is cancelled or rescheduled (reschedule_from set + new date).
+    Optionally exclude one booking (used during client reschedule so the
+    booking's own slot doesn't block the new time selection).
     """
     blocked: set[int] = set()
     async with async_session() as session:
-        result = await session.execute(
-            select(Booking).where(
-                Booking.booking_date == date_str,
-                Booking.status.not_in(["cancelled"]),
-                Booking.booking_time.isnot(None),
-                Booking.booking_hours.isnot(None),
-            )
+        q = select(Booking).where(
+            Booking.booking_date == date_str,
+            Booking.status.not_in(["cancelled"]),
+            Booking.booking_time.isnot(None),
+            Booking.booking_hours.isnot(None),
         )
+        if exclude_booking_id is not None:
+            q = q.where(Booking.id != exclude_booking_id)
+        result = await session.execute(q)
         for b in result.scalars().all():
             try:
-                start    = int(b.booking_time.split(":")[0])
-                end      = start + b.booking_hours + 1  # +1 buffer
+                start = int(b.booking_time.split(":")[0])
+                end   = start + b.booking_hours + 1  # +1 buffer
                 for h in range(start, min(end, 24)):
                     blocked.add(h)
             except Exception:
@@ -338,13 +343,18 @@ async def get_booked_hours(date_str: str) -> set[int]:
     return blocked
 
 
-async def get_max_available_hours(date: str, start_hour: int, requested_hours: int) -> int:
+async def get_max_available_hours(
+    date: str,
+    start_hour: int,
+    requested_hours: int,
+    exclude_booking_id: int | None = None,
+) -> int:
     """How many hours are actually available at start_hour on date.
 
     Returns requested_hours when there's no conflict.
     Returns 0..N when existing bookings limit the slot (accounting for the +1 buffer rule).
     """
-    blocked = await get_booked_hours(date)
+    blocked = await get_booked_hours(date, exclude_booking_id=exclude_booking_id)
     first_conflict: int | None = None
     for h in range(start_hour, start_hour + requested_hours + 1):
         if h in blocked:
@@ -353,6 +363,25 @@ async def get_max_available_hours(date: str, start_hour: int, requested_hours: i
     if first_conflict is None:
         return requested_hours
     return max(0, first_conflict - start_hour - 1)
+
+
+async def reschedule_client_booking(
+    booking_id: int,
+    new_date: str,
+    new_time: str,
+    new_hours: int,
+) -> Booking | None:
+    """Update date/time/hours and reset reminder flag so the 24h reminder fires again."""
+    async with async_session() as session:
+        booking = await session.get(Booking, booking_id)
+        if booking:
+            booking.booking_date  = new_date
+            booking.booking_time  = new_time
+            booking.booking_hours = new_hours
+            booking.reminded      = 0
+            await session.commit()
+            await session.refresh(booking)
+        return booking
 
 
 async def get_bookings_by_status(statuses: set[str], limit: int = 50) -> list[tuple[Booking, Client]]:
