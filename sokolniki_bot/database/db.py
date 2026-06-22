@@ -94,11 +94,22 @@ def _migrate(conn):
     inspector = sa.inspect(conn)
     tables = inspector.get_table_names()
 
-    # Add `reminded` column to bookings if missing
+    # Add missing columns to bookings
     if "bookings" in tables:
         existing = {c["name"] for c in inspector.get_columns("bookings")}
         if "reminded" not in existing:
             conn.execute(sa.text("ALTER TABLE bookings ADD COLUMN reminded INTEGER DEFAULT 0"))
+        if "guest_name" not in existing:
+            conn.execute(sa.text("ALTER TABLE bookings ADD COLUMN guest_name TEXT"))
+        if "guest_phone" not in existing:
+            conn.execute(sa.text("ALTER TABLE bookings ADD COLUMN guest_phone TEXT"))
+        # Backfill existing rows from client profile (best-effort, won't overwrite real data)
+        conn.execute(sa.text(
+            "UPDATE bookings SET "
+            "guest_name  = (SELECT name  FROM clients WHERE clients.id = bookings.client_id), "
+            "guest_phone = (SELECT phone FROM clients WHERE clients.id = bookings.client_id) "
+            "WHERE guest_name IS NULL OR guest_phone IS NULL"
+        ))
 
     # Migrate legacy booking data from clients → bookings (one-time)
     if "clients" in tables and "bookings" in tables:
@@ -184,6 +195,8 @@ async def create_booking(client_id: int, data: dict) -> Booking:
     async with async_session() as session:
         booking = Booking(
             client_id    = client_id,
+            guest_name   = data.get("name"),
+            guest_phone  = data.get("phone"),
             lead_type    = data.get("lead_type", "booking"),
             content_type = data.get("content_type"),
             booking_date = data.get("date"),
