@@ -19,6 +19,7 @@ from bot.keyboards import (
 )
 from bot.states import BookingForm, ClientRescheduleState, MyBookingsState
 from config import ADMIN_ID
+from bot.notify import notify_admins
 from database.db import (
     async_session, cancel_booking, create_booking, get_booked_hours,
     get_client_bookings, get_booking_with_client, get_max_available_hours,
@@ -365,8 +366,8 @@ async def _finish_booking(message: Message, state: FSMContext, phone: str) -> No
         f"└ #заявка_{booking.id}"
     )
     try:
-        await message.bot.send_message(ADMIN_ID, admin_text, parse_mode="HTML",
-                                       link_preview_options=NO_PREVIEW)
+        await notify_admins(message.bot, admin_text, parse_mode="HTML",
+                            link_preview_options=NO_PREVIEW)
     except Exception as e:
         logger.error(f"Admin notify failed: {e}")
 
@@ -645,8 +646,8 @@ async def _send_cancel_admin_notify(bot, data: dict, reason: str | None,
         f"{reason_line}"
     )
     try:
-        await bot.send_message(ADMIN_ID, text, parse_mode="HTML",
-                               link_preview_options=NO_PREVIEW)
+        await notify_admins(bot, text, parse_mode="HTML",
+                            link_preview_options=NO_PREVIEW)
     except Exception as e:
         logger.error(f"Admin cancel notify failed: {e}")
 
@@ -850,12 +851,12 @@ async def client_reschedule_confirm(callback: CallbackQuery, state: FSMContext) 
         parse_mode="HTML",
     )
 
-    # Notify admin
+    # Notify all admins
     booking, client = pair
     tg = f"@{client.username}" if client.username else f"<code>{client.telegram_id}</code>"
     try:
-        await callback.bot.send_message(
-            ADMIN_ID,
+        await notify_admins(
+            callback.bot,
             f"🔄 <b>Клиент перенёс бронь #{booking_id}</b>\n\n"
             f"├ 👤 {booking.guest_name or client.name or '—'} ({tg})\n"
             f"├ 📅 Было: <b>{old_date} в {old_time}</b>\n"
@@ -911,6 +912,21 @@ async def client_reschedule_cancel(callback: CallbackQuery, state: FSMContext) -
             text, parse_mode="HTML",
             reply_markup=my_booking_item_kb(booking.id, can_cancel=can_act, can_reschedule=can_act),
         )
+
+
+# ─── НАПИСАТЬ НАМ ─────────────────────────────────────────────────────────────
+
+@router.message(F.text == "📩 Написать нам")
+async def contact_us(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer(
+        "📩 <b>Написать нам</b>\n\n"
+        "Если у вас есть вопросы или пожелания, можете написать нам "
+        "<a href=\"https://t.me/vovafounder\">@vovafounder</a>",
+        parse_mode="HTML",
+        reply_markup=main_menu(),
+        link_preview_options=NO_PREVIEW,
+    )
 
 
 # ─── PRICES ───────────────────────────────────────────────────────────────────
