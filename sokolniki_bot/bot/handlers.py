@@ -113,8 +113,39 @@ def _is_today(date_str: str) -> bool:
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext) -> None:
     await state.clear()
+
+    # 1. Register client (fast local DB write)
     await get_or_create_client(message.from_user.id, message.from_user.username)
-    await send_section(message, "welcome", reply_markup=main_menu())
+
+    # 2. Fetch welcome content — if DB is slow or section missing, fall back instantly
+    section = await get_content("welcome")
+    welcome_text = (section.text if section else
+                    "🎙 <b>Студия «Сокольники»</b>\n\nВыберите раздел 👇")
+
+    # 3. Send main menu immediately (text-only — no image upload delay)
+    await message.answer(
+        welcome_text,
+        parse_mode="HTML",
+        reply_markup=main_menu(),
+        link_preview_options=NO_PREVIEW,
+    )
+
+    # 4. Send banner photo as a follow-up (non-blocking from user's perspective)
+    if section:
+        photo_sent = False
+        if section.photo_file_id:
+            try:
+                await message.answer_photo(photo=section.photo_file_id)
+                photo_sent = True
+            except Exception:
+                pass
+        if not photo_sent and section.local_banner:
+            path = os.path.join(IMAGES_DIR, section.local_banner)
+            if os.path.exists(path):
+                try:
+                    await message.answer_photo(photo=FSInputFile(path))
+                except Exception:
+                    pass
 
 
 # ─── /cancel ──────────────────────────────────────────────────────────────────
