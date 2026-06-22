@@ -10,16 +10,16 @@ from sqlalchemy import distinct
 
 from bot.keyboards import (
     admin_bookings_menu, admin_broadcast_menu, admin_main_menu,
-    broadcast_confirm_kb, content_back_to_section_kb, content_edit_kb,
-    content_sections_kb, main_menu, new_booking_actions_kb,
-    processing_booking_actions_kb,
+    broadcast_confirm_kb, confirm_delete_booking_kb, content_back_to_section_kb,
+    content_edit_kb, content_sections_kb, done_booking_actions_kb, main_menu,
+    new_booking_actions_kb, processing_booking_actions_kb,
 )
 from bot.states import AdminAction, BroadcastForm, EditContentFSM
 from config import ADMIN_ID
 from database.db import (
-    async_session, get_all_content, get_analytics, get_booking_with_client,
-    get_bookings_by_status, get_content, get_or_create_client,
-    reset_content_to_defaults, update_booking_status,
+    async_session, delete_booking, get_all_content, get_analytics,
+    get_booking_with_client, get_bookings_by_status, get_content,
+    get_or_create_client, reset_content_to_defaults, update_booking_status,
     update_content_photo, update_content_text,
 )
 from database.models import Booking, Client
@@ -29,8 +29,8 @@ logger = logging.getLogger(__name__)
 NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
 
 NEW_STATUSES        = {"new_request", "lead"}
-PROCESSING_STATUSES = {"confirmed", "recorded", "paid"}
-DONE_STATUSES       = {"done_paid", "done_no_pay", "rescheduled_done"}
+PROCESSING_STATUSES = {"confirmed", "recorded", "paid", "done_no_pay"}
+DONE_STATUSES       = {"done_paid", "rescheduled_done"}
 
 STATUS_LABELS = {
     "new_request":      "🆕 Новая",
@@ -204,7 +204,7 @@ async def view_booking(callback: CallbackQuery) -> None:
     elif booking.status in PROCESSING_STATUSES:
         kb = processing_booking_actions_kb(booking.id)
     else:
-        kb = None
+        kb = done_booking_actions_kb(booking.id)
 
     await callback.message.answer(text, parse_mode="HTML", reply_markup=kb,
                                   link_preview_options=NO_PREVIEW)
@@ -428,6 +428,42 @@ async def admin_reschedule_time(message: Message, state: FSMContext) -> None:
         parse_mode="HTML", link_preview_options=NO_PREVIEW)
 
 
+# ─── DELETE BOOKING ───────────────────────────────────────────────────────────
+
+@router.callback_query(F.data.startswith("del_booking:"))
+async def del_booking_prompt(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔"); return
+    booking_id = int(callback.data.split(":")[1])
+    await callback.message.answer(
+        f"🗑 <b>Вы точно хотите удалить заявку #{booking_id}?</b>\n"
+        "Это действие нельзя отменить.",
+        parse_mode="HTML",
+        reply_markup=confirm_delete_booking_kb(booking_id),
+        link_preview_options=NO_PREVIEW,
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("del_booking_confirm:"))
+async def del_booking_execute(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔"); return
+    booking_id = int(callback.data.split(":")[1])
+    deleted = await delete_booking(booking_id)
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    if deleted:
+        await callback.message.answer(
+            f"✅ <b>Заявка #{booking_id} удалена.</b>",
+            parse_mode="HTML", link_preview_options=NO_PREVIEW)
+    else:
+        await callback.message.answer("⚠️ Заявка не найдена.", link_preview_options=NO_PREVIEW)
+    await callback.answer()
+
+
 # ─── АНАЛИТИКА ────────────────────────────────────────────────────────────────
 
 @router.message(F.text == "📊 Аналитика")
@@ -443,7 +479,7 @@ async def admin_analytics(message: Message) -> None:
         f"├ ⚙️ В обработке: <b>{stats['proc']}</b>\n"
         f"├ ✅ Завершено с оплатой: <b>{stats['done']}</b>\n"
         f"├ 💵 Выручка: <b>{stats['revenue']:,.0f} ₽</b>\n"
-        f"└ ⏱ Часов отработано: <b>{stats['hours']:.1f} ч</b>",
+        f"└ ⏱ Часов отработано: <b>{int(stats['hours'])} ч</b>",
         parse_mode="HTML", link_preview_options=NO_PREVIEW)
 
 
