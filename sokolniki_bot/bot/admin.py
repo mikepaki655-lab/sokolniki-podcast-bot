@@ -12,21 +12,31 @@ from bot.keyboards import (
     admin_bookings_menu, admin_broadcast_menu, admin_main_menu,
     broadcast_confirm_kb, confirm_delete_booking_kb, content_back_to_section_kb,
     content_edit_kb, content_sections_kb, done_booking_actions_kb, main_menu,
-    new_booking_actions_kb, processing_booking_actions_kb,
+    manage_admins_kb, new_booking_actions_kb, processing_booking_actions_kb,
 )
-from bot.states import AdminAction, BroadcastForm, EditContentFSM
+from bot.states import AdminAction, AdminManageState, BroadcastForm, EditContentFSM
 from config import ADMIN_ID
 from database.db import (
-    async_session, delete_booking, get_all_content, get_analytics,
-    get_booking_with_client, get_bookings_by_status, get_content,
-    get_or_create_client, reset_content_to_defaults, update_booking_status,
-    update_content_photo, update_content_text,
+    add_admin_username, async_session, delete_booking, get_all_admin_usernames,
+    get_all_content, get_analytics, get_booking_with_client, get_bookings_by_status,
+    get_content, get_or_create_client, remove_admin_username, reset_content_to_defaults,
+    update_booking_status, update_content_photo, update_content_text,
 )
 from database.models import Booking, Client
 
 router = Router()
 logger = logging.getLogger(__name__)
 NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
+
+# ─── MULTI-ADMIN SUPPORT ──────────────────────────────────────────────────────
+
+_ADMIN_USERNAMES: set[str] = set()   # extra admins from DB (lowercase, no @)
+
+
+def load_extra_admins(usernames: list[str]) -> None:
+    """Called at startup to populate the in-memory admin username set."""
+    global _ADMIN_USERNAMES
+    _ADMIN_USERNAMES = {u.lower() for u in usernames}
 
 NEW_STATUSES        = {"new_request", "lead"}
 PROCESSING_STATUSES = {"confirmed", "recorded", "paid", "done_no_pay"}
@@ -74,16 +84,21 @@ def _confirmed_message(booking) -> str:
     )
 
 
-def is_admin(uid: int) -> bool:
-    return uid == ADMIN_ID
+def is_admin(uid: int, username: str | None = None) -> bool:
+    if uid == ADMIN_ID:
+        return True
+    if username and username.lower() in _ADMIN_USERNAMES:
+        return True
+    return False
 
 
 # ─── /admin ───────────────────────────────────────────────────────────────────
 
 @router.message(Command("admin"))
 async def cmd_admin(message: Message, state: FSMContext) -> None:
-    if not is_admin(message.from_user.id):
-        await message.answer("⛔ Доступ запрещён.")
+    if not is_admin(message.from_user.id, message.from_user.username):
+        await message.answer(
+            "😔 К сожалению, у вас нет доступа к админ-панели студии.")
         return
     await state.clear()
     await message.answer(
@@ -94,7 +109,7 @@ async def cmd_admin(message: Message, state: FSMContext) -> None:
 
 @router.message(F.text == "◀️ Вернуться в бота")
 async def back_to_bot(message: Message, state: FSMContext) -> None:
-    if not is_admin(message.from_user.id):
+    if not is_admin(message.from_user.id, message.from_user.username):
         return
     await state.clear()
     await message.answer("👋 Вы вышли из панели управления.",
@@ -105,7 +120,7 @@ async def back_to_bot(message: Message, state: FSMContext) -> None:
 
 @router.message(F.text == "📋 Заявки")
 async def admin_bookings(message: Message, state: FSMContext) -> None:
-    if not is_admin(message.from_user.id):
+    if not is_admin(message.from_user.id, message.from_user.username):
         return
     await state.clear()
     await message.answer("📋 <b>Заявки</b>\n└ Выберите раздел:",
@@ -114,7 +129,7 @@ async def admin_bookings(message: Message, state: FSMContext) -> None:
 
 @router.message(F.text == "◀️ Назад к меню")
 async def bookings_back(message: Message, state: FSMContext) -> None:
-    if not is_admin(message.from_user.id):
+    if not is_admin(message.from_user.id, message.from_user.username):
         return
     await state.clear()
     await message.answer("🎛 <b>Панель управления</b>",
@@ -148,19 +163,19 @@ async def _show_bookings_list(message: Message, statuses: set, title: str) -> No
 
 @router.message(F.text == "🆕 Новые")
 async def admin_new(message: Message, state: FSMContext) -> None:
-    if not is_admin(message.from_user.id): return
+    if not is_admin(message.from_user.id, message.from_user.username): return
     await _show_bookings_list(message, NEW_STATUSES, "🆕 <b>Новые заявки</b>")
 
 
 @router.message(F.text == "⚙️ В обработке")
 async def admin_processing(message: Message, state: FSMContext) -> None:
-    if not is_admin(message.from_user.id): return
+    if not is_admin(message.from_user.id, message.from_user.username): return
     await _show_bookings_list(message, PROCESSING_STATUSES, "⚙️ <b>В обработке</b>")
 
 
 @router.message(F.text == "✅ Завершённые")
 async def admin_done(message: Message, state: FSMContext) -> None:
-    if not is_admin(message.from_user.id): return
+    if not is_admin(message.from_user.id, message.from_user.username): return
     await _show_bookings_list(message, DONE_STATUSES, "✅ <b>Завершённые</b>")
 
 
@@ -168,7 +183,7 @@ async def admin_done(message: Message, state: FSMContext) -> None:
 
 @router.callback_query(F.data.startswith("view_booking:"))
 async def view_booking(callback: CallbackQuery) -> None:
-    if not is_admin(callback.from_user.id):
+    if not is_admin(callback.from_user.id, callback.from_user.username):
         await callback.answer("⛔"); return
 
     booking_id = int(callback.data.split(":")[1])
@@ -215,7 +230,7 @@ async def view_booking(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("bstatus:"))
 async def set_booking_status(callback: CallbackQuery, state: FSMContext) -> None:
-    if not is_admin(callback.from_user.id):
+    if not is_admin(callback.from_user.id, callback.from_user.username):
         await callback.answer("⛔"); return
 
     parts = callback.data.split(":")
@@ -286,7 +301,7 @@ async def _notify_client(callback, booking_id: int, new_status: str) -> None:
 
 @router.message(AdminAction.payment_amount)
 async def admin_payment_amount(message: Message, state: FSMContext) -> None:
-    if not is_admin(message.from_user.id): return
+    if not is_admin(message.from_user.id, message.from_user.username): return
     try:
         amount = float(message.text.strip().replace(",", ".").replace(" ", ""))
     except ValueError:
@@ -300,7 +315,7 @@ async def admin_payment_amount(message: Message, state: FSMContext) -> None:
 
 @router.message(AdminAction.payment_hours)
 async def admin_payment_hours(message: Message, state: FSMContext) -> None:
-    if not is_admin(message.from_user.id): return
+    if not is_admin(message.from_user.id, message.from_user.username): return
     try:
         hours = float(message.text.strip().replace(",", "."))
     except ValueError:
@@ -343,7 +358,7 @@ async def admin_payment_hours(message: Message, state: FSMContext) -> None:
 
 @router.message(AdminAction.no_pay_reason)
 async def admin_no_pay_reason(message: Message, state: FSMContext) -> None:
-    if not is_admin(message.from_user.id): return
+    if not is_admin(message.from_user.id, message.from_user.username): return
     data = await state.get_data()
     await state.clear()
 
@@ -363,7 +378,7 @@ async def admin_no_pay_reason(message: Message, state: FSMContext) -> None:
 
 @router.message(AdminAction.reschedule_reason)
 async def admin_reschedule_reason(message: Message, state: FSMContext) -> None:
-    if not is_admin(message.from_user.id): return
+    if not is_admin(message.from_user.id, message.from_user.username): return
     await state.update_data(reschedule_reason=message.text.strip())
     await state.set_state(AdminAction.reschedule_date)
     await message.answer("📅 Новая дата (например: 25.07.2026):",
@@ -372,7 +387,7 @@ async def admin_reschedule_reason(message: Message, state: FSMContext) -> None:
 
 @router.message(AdminAction.reschedule_date)
 async def admin_reschedule_date(message: Message, state: FSMContext) -> None:
-    if not is_admin(message.from_user.id): return
+    if not is_admin(message.from_user.id, message.from_user.username): return
     await state.update_data(reschedule_new_date=message.text.strip())
     await state.set_state(AdminAction.reschedule_time)
     await message.answer("🕐 Новое время начала (например: 14:00):",
@@ -381,7 +396,7 @@ async def admin_reschedule_date(message: Message, state: FSMContext) -> None:
 
 @router.message(AdminAction.reschedule_time)
 async def admin_reschedule_time(message: Message, state: FSMContext) -> None:
-    if not is_admin(message.from_user.id): return
+    if not is_admin(message.from_user.id, message.from_user.username): return
     data = await state.get_data()
     await state.clear()
 
@@ -428,11 +443,97 @@ async def admin_reschedule_time(message: Message, state: FSMContext) -> None:
         parse_mode="HTML", link_preview_options=NO_PREVIEW)
 
 
+# ─── УПРАВЛЕНИЕ АДМИНКОЙ ──────────────────────────────────────────────────────
+
+@router.message(F.text == "🔧 Управление Админкой")
+async def admin_manage_menu(message: Message, state: FSMContext) -> None:
+    if not is_admin(message.from_user.id, message.from_user.username): return
+    await state.clear()
+    admins = await get_all_admin_usernames()
+    admins_list = "\n".join(f"• @{u}" for u in admins) if admins else "— (только владелец)"
+    await message.answer(
+        f"🔧 <b>Управление Админкой</b>\n\n"
+        f"<b>Текущие администраторы:</b>\n{admins_list}\n\n"
+        "Выберите действие:",
+        parse_mode="HTML",
+        reply_markup=manage_admins_kb(),
+        link_preview_options=NO_PREVIEW,
+    )
+
+
+@router.callback_query(F.data == "admin_manage:add")
+async def admin_manage_add_cb(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id, callback.from_user.username):
+        await callback.answer("⛔"); return
+    await state.set_state(AdminManageState.add_username)
+    await callback.message.answer(
+        "➕ <b>Добавить Админа</b>\n\n"
+        "Напишите имя пользователя через @ (например: <code>@username</code>):",
+        parse_mode="HTML", link_preview_options=NO_PREVIEW)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin_manage:remove")
+async def admin_manage_remove_cb(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id, callback.from_user.username):
+        await callback.answer("⛔"); return
+    await state.set_state(AdminManageState.remove_username)
+    await callback.message.answer(
+        "❌ <b>Удалить Админа</b>\n\n"
+        "Напишите имя пользователя через @ (например: <code>@username</code>):",
+        parse_mode="HTML", link_preview_options=NO_PREVIEW)
+    await callback.answer()
+
+
+@router.message(AdminManageState.add_username)
+async def admin_manage_add_exec(message: Message, state: FSMContext) -> None:
+    if not is_admin(message.from_user.id, message.from_user.username): return
+    raw = message.text.strip() if message.text else ""
+    if not raw.startswith("@") or len(raw) < 2:
+        await message.answer("⚠️ Введите username в формате @username.")
+        return
+    uname = raw.lstrip("@").lower()
+    added = await add_admin_username(uname)
+    await state.clear()
+    # Update in-memory set
+    _ADMIN_USERNAMES.add(uname)
+    if added:
+        await message.answer(
+            f"✅ <b>@{uname}</b> добавлен как администратор.",
+            parse_mode="HTML", link_preview_options=NO_PREVIEW)
+    else:
+        await message.answer(
+            f"ℹ️ <b>@{uname}</b> уже является администратором.",
+            parse_mode="HTML", link_preview_options=NO_PREVIEW)
+
+
+@router.message(AdminManageState.remove_username)
+async def admin_manage_remove_exec(message: Message, state: FSMContext) -> None:
+    if not is_admin(message.from_user.id, message.from_user.username): return
+    raw = message.text.strip() if message.text else ""
+    if not raw.startswith("@") or len(raw) < 2:
+        await message.answer("⚠️ Введите username в формате @username.")
+        return
+    uname = raw.lstrip("@").lower()
+    removed = await remove_admin_username(uname)
+    await state.clear()
+    # Update in-memory set
+    _ADMIN_USERNAMES.discard(uname)
+    if removed:
+        await message.answer(
+            f"✅ <b>@{uname}</b> удалён из администраторов.",
+            parse_mode="HTML", link_preview_options=NO_PREVIEW)
+    else:
+        await message.answer(
+            f"⚠️ <b>@{uname}</b> не найден в списке администраторов.",
+            parse_mode="HTML", link_preview_options=NO_PREVIEW)
+
+
 # ─── DELETE BOOKING ───────────────────────────────────────────────────────────
 
 @router.callback_query(F.data.startswith("del_booking:"))
 async def del_booking_prompt(callback: CallbackQuery) -> None:
-    if not is_admin(callback.from_user.id):
+    if not is_admin(callback.from_user.id, callback.from_user.username):
         await callback.answer("⛔"); return
     booking_id = int(callback.data.split(":")[1])
     await callback.message.answer(
@@ -447,7 +548,7 @@ async def del_booking_prompt(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("del_booking_confirm:"))
 async def del_booking_execute(callback: CallbackQuery) -> None:
-    if not is_admin(callback.from_user.id):
+    if not is_admin(callback.from_user.id, callback.from_user.username):
         await callback.answer("⛔"); return
     booking_id = int(callback.data.split(":")[1])
     deleted = await delete_booking(booking_id)
@@ -468,7 +569,7 @@ async def del_booking_execute(callback: CallbackQuery) -> None:
 
 @router.message(F.text == "📊 Аналитика")
 async def admin_analytics(message: Message) -> None:
-    if not is_admin(message.from_user.id): return
+    if not is_admin(message.from_user.id, message.from_user.username): return
 
     stats = await get_analytics(days=7)
 
@@ -494,7 +595,7 @@ TARGET_MAP = {
 
 @router.message(F.text == "📨 Рассылка")
 async def admin_broadcast_menu_msg(message: Message, state: FSMContext) -> None:
-    if not is_admin(message.from_user.id): return
+    if not is_admin(message.from_user.id, message.from_user.username): return
     await state.clear()
     await message.answer("📨 <b>Рассылка</b>\n└ Кому отправить?",
                          parse_mode="HTML", reply_markup=admin_broadcast_menu())
@@ -502,7 +603,7 @@ async def admin_broadcast_menu_msg(message: Message, state: FSMContext) -> None:
 
 @router.message(F.text.in_(TARGET_MAP.keys()))
 async def broadcast_choose_target(message: Message, state: FSMContext) -> None:
-    if not is_admin(message.from_user.id): return
+    if not is_admin(message.from_user.id, message.from_user.username): return
     target = TARGET_MAP[message.text]
     await state.update_data(broadcast_target=target)
     await state.set_state(BroadcastForm.message)
@@ -513,7 +614,7 @@ async def broadcast_choose_target(message: Message, state: FSMContext) -> None:
 
 @router.message(BroadcastForm.message)
 async def broadcast_get_message(message: Message, state: FSMContext) -> None:
-    if not is_admin(message.from_user.id): return
+    if not is_admin(message.from_user.id, message.from_user.username): return
     await state.update_data(broadcast_text=message.text)
     await state.set_state(BroadcastForm.confirm)
     data = await state.get_data()
@@ -528,7 +629,7 @@ async def broadcast_get_message(message: Message, state: FSMContext) -> None:
 
 @router.callback_query(F.data == "broadcast_confirm:yes")
 async def broadcast_send(callback: CallbackQuery, state: FSMContext) -> None:
-    if not is_admin(callback.from_user.id): await callback.answer("⛔"); return
+    if not is_admin(callback.from_user.id, callback.from_user.username): await callback.answer("⛔"); return
     data   = await state.get_data()
     target = data.get("broadcast_target", "all")
     text   = data.get("broadcast_text", "")
@@ -576,7 +677,7 @@ async def broadcast_cancel_cb(callback: CallbackQuery, state: FSMContext) -> Non
 
 @router.message(F.text == "📝 Контент")
 async def admin_content_menu(message: Message, state: FSMContext) -> None:
-    if not is_admin(message.from_user.id): return
+    if not is_admin(message.from_user.id, message.from_user.username): return
     await state.clear()
     sections = await get_all_content()
     await message.answer(
@@ -586,7 +687,7 @@ async def admin_content_menu(message: Message, state: FSMContext) -> None:
 
 @router.callback_query(F.data == "admin:content")
 async def admin_content_cb(callback: CallbackQuery, state: FSMContext) -> None:
-    if not is_admin(callback.from_user.id): await callback.answer("⛔"); return
+    if not is_admin(callback.from_user.id, callback.from_user.username): await callback.answer("⛔"); return
     await state.clear()
     sections = await get_all_content()
     await callback.message.answer(
@@ -597,7 +698,7 @@ async def admin_content_cb(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(F.data.startswith("content:section:"))
 async def content_section_detail(callback: CallbackQuery, state: FSMContext) -> None:
-    if not is_admin(callback.from_user.id): await callback.answer("⛔"); return
+    if not is_admin(callback.from_user.id, callback.from_user.username): await callback.answer("⛔"); return
     await state.clear()
     key     = callback.data.split(":", 2)[2]
     section = await get_content(key)
@@ -614,7 +715,7 @@ async def content_section_detail(callback: CallbackQuery, state: FSMContext) -> 
 
 @router.callback_query(F.data.startswith("content:edit_text:"))
 async def content_start_edit_text(callback: CallbackQuery, state: FSMContext) -> None:
-    if not is_admin(callback.from_user.id): await callback.answer("⛔"); return
+    if not is_admin(callback.from_user.id, callback.from_user.username): await callback.answer("⛔"); return
     key     = callback.data.split(":", 2)[2]
     section = await get_content(key)
     await state.set_state(EditContentFSM.edit_text)
@@ -629,7 +730,7 @@ async def content_start_edit_text(callback: CallbackQuery, state: FSMContext) ->
 
 @router.message(EditContentFSM.edit_text)
 async def content_save_text(message: Message, state: FSMContext) -> None:
-    if not is_admin(message.from_user.id): return
+    if not is_admin(message.from_user.id, message.from_user.username): return
     data = await state.get_data()
     key  = data.get("editing_key")
     await state.clear()
@@ -643,7 +744,7 @@ async def content_save_text(message: Message, state: FSMContext) -> None:
 
 @router.callback_query(F.data.startswith("content:edit_photo:"))
 async def content_start_edit_photo(callback: CallbackQuery, state: FSMContext) -> None:
-    if not is_admin(callback.from_user.id): await callback.answer("⛔"); return
+    if not is_admin(callback.from_user.id, callback.from_user.username): await callback.answer("⛔"); return
     key = callback.data.split(":", 2)[2]
     await state.set_state(EditContentFSM.edit_photo)
     await state.update_data(editing_key=key)
@@ -655,7 +756,7 @@ async def content_start_edit_photo(callback: CallbackQuery, state: FSMContext) -
 
 @router.message(EditContentFSM.edit_photo)
 async def content_save_photo(message: Message, state: FSMContext) -> None:
-    if not is_admin(message.from_user.id): return
+    if not is_admin(message.from_user.id, message.from_user.username): return
     if not message.photo:
         await message.answer("⚠️ Отправьте фото.")
         return
@@ -672,7 +773,7 @@ async def content_save_photo(message: Message, state: FSMContext) -> None:
 
 @router.callback_query(F.data.startswith("content:preview:"))
 async def content_preview(callback: CallbackQuery) -> None:
-    if not is_admin(callback.from_user.id): await callback.answer("⛔"); return
+    if not is_admin(callback.from_user.id, callback.from_user.username): await callback.answer("⛔"); return
     key     = callback.data.split(":", 2)[2]
     section = await get_content(key)
     if not section:
