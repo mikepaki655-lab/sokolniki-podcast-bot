@@ -6,6 +6,7 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, LinkPreviewOptions, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from sqlalchemy import distinct
 
 from bot.keyboards import (
     admin_bookings_menu, admin_broadcast_menu, admin_main_menu,
@@ -308,7 +309,7 @@ async def admin_payment_hours(message: Message, state: FSMContext) -> None:
             await message.bot.send_message(
                 client.telegram_id,
                 "✅ <b>Спасибо за оплату!</b>\n\n"
-                "Ваша сессия завершена. Ждём вас снова в студии «Сокольники» 🎙",
+                "Ваша бронь завершена. Ждём вас снова в студии «Сокольники» 🎙",
                 parse_mode="HTML", link_preview_options=NO_PREVIEW)
         except Exception:
             pass
@@ -349,13 +350,13 @@ async def admin_reschedule_reason(message: Message, state: FSMContext) -> None:
 async def admin_reschedule_date(message: Message, state: FSMContext) -> None:
     if not is_admin(message.from_user.id): return
     await state.update_data(reschedule_new_date=message.text.strip())
-    await state.set_state(AdminAction.reschedule_hours)
+    await state.set_state(AdminAction.reschedule_time)
     await message.answer("🕐 Новое время начала (например: 14:00):",
                          link_preview_options=NO_PREVIEW)
 
 
-@router.message(AdminAction.reschedule_hours)
-async def admin_reschedule_hours(message: Message, state: FSMContext) -> None:
+@router.message(AdminAction.reschedule_time)
+async def admin_reschedule_time(message: Message, state: FSMContext) -> None:
     if not is_admin(message.from_user.id): return
     data = await state.get_data()
     await state.clear()
@@ -473,9 +474,8 @@ async def broadcast_send(callback: CallbackQuery, state: FSMContext) -> None:
     text   = data.get("broadcast_text", "")
     await state.clear()
 
-    from sqlalchemy import select as sa_select
     async with async_session() as session:
-        q = sa_select(Client.telegram_id)
+        q = select(Client.telegram_id)
         if target != "all":
             if target == "new_request":
                 status_filter = NEW_STATUSES
@@ -483,12 +483,9 @@ async def broadcast_send(callback: CallbackQuery, state: FSMContext) -> None:
                 status_filter = PROCESSING_STATUSES
             else:
                 status_filter = DONE_STATUSES
-            # Get telegram_ids that have bookings with matching status
-            from sqlalchemy import distinct
-            from database.models import Booking as BookingModel
-            q = (sa_select(distinct(Client.telegram_id))
-                 .join(BookingModel, BookingModel.client_id == Client.id)
-                 .where(BookingModel.status.in_(status_filter)))
+            q = (select(distinct(Client.telegram_id))
+                 .join(Booking, Booking.client_id == Client.id)
+                 .where(Booking.status.in_(status_filter)))
         ids = [r[0] for r in (await session.execute(q)).fetchall()]
 
     sent = failed = 0
