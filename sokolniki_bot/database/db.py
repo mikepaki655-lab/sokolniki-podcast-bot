@@ -116,11 +116,19 @@ def _migrate(conn):
     # ── Admins table ──────────────────────────────────────────────────────────
     conn.execute(sa.text("""
         CREATE TABLE IF NOT EXISTS admins (
-            id         INTEGER PRIMARY KEY AUTOINCREMENT,
-            username   VARCHAR(100) NOT NULL UNIQUE,
-            added_at   DATETIME    DEFAULT CURRENT_TIMESTAMP
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            username    VARCHAR(100) NOT NULL UNIQUE,
+            telegram_id BIGINT,
+            added_at    DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     """))
+    # Add telegram_id column to existing admins table if missing
+    if "admins" in tables:
+        admin_cols = {c["name"] for c in inspector.get_columns("admins")}
+        if "telegram_id" not in admin_cols:
+            conn.execute(sa.text(
+                "ALTER TABLE admins ADD COLUMN telegram_id BIGINT"
+            ))
 
     # ── Remove deprecated "free" content section ──────────────────────────────
     if "section_content" in tables:
@@ -247,6 +255,32 @@ async def get_all_admin_usernames() -> list[str]:
     async with async_session() as session:
         result = await session.execute(sa_text("SELECT username FROM admins ORDER BY added_at"))
         return [row[0] for row in result.fetchall()]
+
+
+async def get_all_admin_telegram_ids() -> list[int]:
+    """Return telegram_ids of ALL admins: owner (ADMIN_ID) + extra admins with known IDs."""
+    from config import ADMIN_ID as _OWNER_ID
+    ids: list[int] = [_OWNER_ID]
+    async with async_session() as session:
+        result = await session.execute(
+            sa_text("SELECT telegram_id FROM admins WHERE telegram_id IS NOT NULL")
+        )
+        for row in result.fetchall():
+            tg_id = row[0]
+            if tg_id and tg_id not in ids:
+                ids.append(tg_id)
+    return ids
+
+
+async def update_admin_telegram_id(username: str, telegram_id: int) -> None:
+    """Save the telegram_id for an extra admin so they receive broadcast notifications."""
+    uname = username.lstrip("@").lower()
+    async with async_session() as session:
+        await session.execute(
+            sa_text("UPDATE admins SET telegram_id = :tid WHERE username = :u"),
+            {"tid": telegram_id, "u": uname},
+        )
+        await session.commit()
 
 
 async def add_admin_username(username: str) -> bool:
