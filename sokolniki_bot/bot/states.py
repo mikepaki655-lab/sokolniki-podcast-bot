@@ -45,3 +45,8 @@ class ClientRescheduleState(StatesGroup):
     time    = State()
     hours   = State()
     confirm = State()
+
+
+class AnalyticsState(StatesGroup):
+    pick_start = State()
+    pick_end   = State()
