@@ -52,12 +52,16 @@ async def main() -> None:
 
     logger.info("Starting bot polling...")
 
+    # Remove any stale webhook registration (does NOT drop pending user messages)
+    await bot.delete_webhook(drop_pending_updates=False)
+
     retry_delay = 5
+    reminder_started = False
     while True:
         try:
-            # Drop any stale webhook / pending updates from previous run
-            await bot.delete_webhook(drop_pending_updates=True)
-            asyncio.create_task(reminder_loop(bot))
+            if not reminder_started:
+                asyncio.create_task(reminder_loop(bot))
+                reminder_started = True
             await dp.start_polling(bot, allowed_updates=["message", "callback_query"])
             break  # clean stop
         except Exception as exc:
