@@ -22,7 +22,6 @@ def main_menu() -> ReplyKeyboardMarkup:
         KeyboardButton(text="💰 Узнать цены"),
         KeyboardButton(text="📍 Адрес студии"),
     )
-    builder.row(KeyboardButton(text="🔥 Первый выпуск бесплатно"))
     return builder.as_markup(resize_keyboard=True)
 
 
@@ -181,11 +180,6 @@ def prices_kb() -> InlineKeyboardMarkup:
     builder.button(text="📝 Записаться", callback_data="go_booking")
     return builder.as_markup()
 
-
-def free_episode_kb() -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.button(text="🎁 Записаться бесплатно", callback_data="go_free_episode")
-    return builder.as_markup()
 
 
 def cancel_kb() -> InlineKeyboardMarkup:
