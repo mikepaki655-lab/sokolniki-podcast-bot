@@ -177,11 +177,75 @@ def my_bookings_menu_kb() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def my_booking_item_kb(booking_id: int, can_cancel: bool = True) -> InlineKeyboardMarkup:
+def my_booking_item_kb(
+    booking_id: int,
+    can_cancel: bool = True,
+    can_reschedule: bool = True,
+) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
+    if can_reschedule:
+        builder.button(text="📅 Перенести",             callback_data=f"reschedule_booking:{booking_id}")
     if can_cancel:
         builder.button(text="❌ Отменить бронирование", callback_data=f"cancel_booking:{booking_id}")
     builder.button(text="◀️ Назад", callback_data="my_bookings:active")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def reschedule_dates_kb() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    today = date.today()
+    for i in range(14):
+        d = today + timedelta(days=i)
+        label = f"{WEEKDAYS[d.weekday()]} {d.day} {MONTHS[d.month - 1]}"
+        value = d.strftime("%d.%m.%Y")
+        builder.button(text=label, callback_data=f"rs_date:{value}")
+    builder.button(text="❌ Отмена", callback_data="cancel")
+    builder.adjust(3)
+    return builder.as_markup()
+
+
+def reschedule_times_kb(blocked: set[int] | None = None, min_hour: int = 0) -> InlineKeyboardMarkup:
+    blocked = blocked or set()
+    builder = InlineKeyboardBuilder()
+    free = [h for h in range(max(0, min_hour), 24) if h not in blocked]
+    if free:
+        for h in free:
+            builder.button(text=f"{h:02d}:00", callback_data=f"rs_time:{h:02d}:00")
+    else:
+        builder.button(text="⛔ Нет свободных слотов", callback_data="no_slots")
+    builder.button(text="❌ Отмена", callback_data="cancel")
+    builder.adjust(4)
+    return builder.as_markup()
+
+
+def reschedule_hours_kb() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for h in range(1, 13):
+        builder.button(text=f"{h} ч", callback_data=f"rs_hours:{h}")
+    builder.button(text="❌ Отмена", callback_data="cancel")
+    builder.adjust(4)
+    return builder.as_markup()
+
+
+def reschedule_slot_conflict_kb(available_hours: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    if available_hours > 0:
+        noun = "час" if available_hours == 1 else "часа" if available_hours < 5 else "часов"
+        builder.button(
+            text=f"✅ Взять {available_hours} {noun}",
+            callback_data=f"rs_hours:{available_hours}",
+        )
+    builder.button(text="🕐 Другое время", callback_data="rs_back_to_time")
+    builder.button(text="📅 Другая дата",  callback_data="rs_back_to_date")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def reschedule_confirm_kb(booking_id: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="✅ Подтвердить перенос", callback_data=f"reschedule_confirm_yes:{booking_id}")
+    builder.button(text="❌ Отмена",               callback_data=f"reschedule_confirm_no:{booking_id}")
     builder.adjust(1)
     return builder.as_markup()
 
