@@ -37,11 +37,20 @@ async def main() -> None:
     dp.include_router(admin_router)
     dp.include_router(user_router)
 
-    # Start 24h reminder background task
-    asyncio.create_task(reminder_loop(bot))
     logger.info("Starting bot polling...")
 
-    await dp.start_polling(bot, allowed_updates=["message", "callback_query"])
+    retry_delay = 5
+    while True:
+        try:
+            # Drop any stale webhook / pending updates from previous run
+            await bot.delete_webhook(drop_pending_updates=True)
+            asyncio.create_task(reminder_loop(bot))
+            await dp.start_polling(bot, allowed_updates=["message", "callback_query"])
+            break  # clean stop
+        except Exception as exc:
+            logger.error("Polling error: %s — retrying in %ss", exc, retry_delay)
+            await asyncio.sleep(retry_delay)
+            retry_delay = min(retry_delay * 2, 60)
 
 
 if __name__ == "__main__":
