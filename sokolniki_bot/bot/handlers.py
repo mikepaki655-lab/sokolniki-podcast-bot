@@ -13,14 +13,16 @@ from sqlalchemy import select
 from bot.keyboards import (
     cancel_kb, confirm_client_cancel_kb, content_type_kb, dates_kb, hours_kb,
     main_menu, my_bookings_menu_kb, my_booking_done_item_kb, my_booking_item_kb,
-    phone_request_kb, prices_kb, remove_kb, skip_reason_kb, slot_conflict_kb, times_kb,
+    phone_request_kb, prices_kb, remove_kb, reschedule_confirm_kb, reschedule_dates_kb,
+    reschedule_hours_kb, reschedule_slot_conflict_kb, reschedule_times_kb,
+    skip_reason_kb, slot_conflict_kb, times_kb,
 )
-from bot.states import BookingForm, MyBookingsState
+from bot.states import BookingForm, ClientRescheduleState, MyBookingsState
 from config import ADMIN_ID
 from database.db import (
     async_session, cancel_booking, create_booking, get_booked_hours,
     get_client_bookings, get_booking_with_client, get_max_available_hours,
-    get_content, get_or_create_client,
+    get_content, get_or_create_client, reschedule_client_booking,
 )
 from database.models import Client
 
@@ -498,7 +500,11 @@ async def my_booking_detail(callback: CallbackQuery, state: FSMContext) -> None:
                                     "recorded", "paid", "rescheduled_done"}
     await callback.message.edit_text(
         text, parse_mode="HTML",
-        reply_markup=my_booking_item_kb(booking.id, can_cancel=can_cancel),
+        reply_markup=my_booking_item_kb(
+            booking.id,
+            can_cancel=can_cancel,
+            can_reschedule=can_cancel,
+        ),
     )
     await callback.answer()
 
@@ -643,6 +649,268 @@ async def _send_cancel_admin_notify(bot, data: dict, reason: str | None,
                                link_preview_options=NO_PREVIEW)
     except Exception as e:
         logger.error(f"Admin cancel notify failed: {e}")
+
+
+# ─── КЛИЕНТСКИЙ ПЕРЕНОС БРОНИ ─────────────────────────────────────────────────
+
+@router.callback_query(F.data.startswith("reschedule_booking:"))
+async def client_reschedule_start(callback: CallbackQuery, state: FSMContext) -> None:
+    booking_id = int(callback.data.split(":")[1])
+    pair = await get_booking_with_client(booking_id)
+    if not pair or pair[1].telegram_id != callback.from_user.id:
+        await callback.answer("⛔ Нет доступа.", show_alert=True)
+        return
+    booking = pair[0]
+    await state.update_data(rs_booking_id=booking_id,
+                            rs_old_date=booking.booking_date or "—",
+                            rs_old_time=booking.booking_time or "—")
+    await state.set_state(ClientRescheduleState.date)
+    await callback.message.edit_text(
+        "📅 <b>Перенос брони</b>\n\n"
+        "Выберите <b>новую дату</b>:",
+        parse_mode="HTML",
+        reply_markup=reschedule_dates_kb(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("rs_date:"), ClientRescheduleState.date)
+async def client_reschedule_date(callback: CallbackQuery, state: FSMContext) -> None:
+    new_date = callback.data.split(":", 1)[1]
+    data = await state.get_data()
+    booking_id = data["rs_booking_id"]
+
+    # Compute min_hour if today
+    today_str = date.today().strftime("%d.%m.%Y")
+    min_hour = 0
+    if new_date == today_str:
+        now_msk = datetime.now(MOSCOW_TZ)
+        min_hour = now_msk.hour + (2 if now_msk.minute > 0 else 1)
+
+    # Blocked hours, excluding this booking's own slot
+    blocked = await get_booked_hours(new_date, exclude_booking_id=booking_id)
+
+    await state.update_data(rs_new_date=new_date, rs_min_hour=min_hour)
+    await state.set_state(ClientRescheduleState.time)
+
+    await callback.message.edit_text(
+        f"📅 <b>Перенос брони</b>\n"
+        f"└ Новая дата: <b>{new_date}</b>\n\n"
+        "Выберите <b>время начала</b>:",
+        parse_mode="HTML",
+        reply_markup=reschedule_times_kb(blocked=blocked, min_hour=min_hour),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("rs_time:"), ClientRescheduleState.time)
+async def client_reschedule_time(callback: CallbackQuery, state: FSMContext) -> None:
+    new_time = callback.data.split(":", 1)[1]
+    start_hour = int(new_time.split(":")[0])
+    data = await state.get_data()
+    booking_id = data["rs_booking_id"]
+    new_date   = data["rs_new_date"]
+
+    # Check max available hours excluding current booking
+    max_avail = await get_max_available_hours(
+        new_date, start_hour, 12,
+        exclude_booking_id=booking_id,
+    )
+
+    await state.update_data(rs_new_time=new_time, rs_start_hour=start_hour)
+    await state.set_state(ClientRescheduleState.hours)
+
+    if max_avail == 0:
+        await callback.message.edit_text(
+            f"📅 <b>Перенос брони</b>\n"
+            f"├ Дата: <b>{new_date}</b>\n"
+            f"└ Время: <b>{new_time}</b>\n\n"
+            "⛔ <b>На это время нет свободных слотов.</b>\n"
+            "Выберите другое время или дату.",
+            parse_mode="HTML",
+            reply_markup=reschedule_slot_conflict_kb(0),
+        )
+    elif max_avail < 12:
+        await callback.message.edit_text(
+            f"📅 <b>Перенос брони</b>\n"
+            f"├ Дата: <b>{new_date}</b>\n"
+            f"└ Время: <b>{new_time}</b>\n\n"
+            f"⚠️ На это время доступно не более <b>{max_avail} ч</b> "
+            "(следующий гость приходит раньше).\n\n"
+            "Выберите длительность:",
+            parse_mode="HTML",
+            reply_markup=reschedule_slot_conflict_kb(max_avail),
+        )
+    else:
+        await callback.message.edit_text(
+            f"📅 <b>Перенос брони</b>\n"
+            f"├ Дата: <b>{new_date}</b>\n"
+            f"└ Время: <b>{new_time}</b>\n\n"
+            "Выберите <b>длительность</b>:",
+            parse_mode="HTML",
+            reply_markup=reschedule_hours_kb(),
+        )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("rs_hours:"), ClientRescheduleState.hours)
+async def client_reschedule_hours(callback: CallbackQuery, state: FSMContext) -> None:
+    new_hours = int(callback.data.split(":")[1])
+    data = await state.get_data()
+    booking_id = data["rs_booking_id"]
+    new_date   = data["rs_new_date"]
+    new_time   = data["rs_new_time"]
+    start_hour = data["rs_start_hour"]
+
+    # Final availability check
+    max_avail = await get_max_available_hours(
+        new_date, start_hour, new_hours,
+        exclude_booking_id=booking_id,
+    )
+    if max_avail < new_hours:
+        await callback.answer(
+            f"⚠️ Конфликт слотов. Доступно не более {max_avail} ч.",
+            show_alert=True,
+        )
+        return
+
+    end_h = start_hour + new_hours
+    await state.update_data(rs_new_hours=new_hours)
+    await state.set_state(ClientRescheduleState.confirm)
+
+    await callback.message.edit_text(
+        f"📅 <b>Подтверждение переноса</b>\n\n"
+        f"├ 📅 Новая дата: <b>{new_date}</b>\n"
+        f"├ 🕐 Время: <b>{start_hour:02d}:00 – {end_h:02d}:00</b>\n"
+        f"└ ⏱ Длительность: <b>{new_hours} ч</b>\n\n"
+        "Подтвердить перенос?",
+        parse_mode="HTML",
+        reply_markup=reschedule_confirm_kb(booking_id),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "rs_back_to_time")
+async def rs_back_to_time(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    booking_id = data.get("rs_booking_id")
+    new_date   = data.get("rs_new_date", "")
+    min_hour   = data.get("rs_min_hour", 0)
+    blocked = await get_booked_hours(new_date, exclude_booking_id=booking_id)
+    await state.set_state(ClientRescheduleState.time)
+    await callback.message.edit_text(
+        f"📅 <b>Перенос брони</b>\n"
+        f"└ Новая дата: <b>{new_date}</b>\n\n"
+        "Выберите <b>другое время</b>:",
+        parse_mode="HTML",
+        reply_markup=reschedule_times_kb(blocked=blocked, min_hour=min_hour),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "rs_back_to_date")
+async def rs_back_to_date(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(ClientRescheduleState.date)
+    await callback.message.edit_text(
+        "📅 <b>Перенос брони</b>\n\n"
+        "Выберите <b>другую дату</b>:",
+        parse_mode="HTML",
+        reply_markup=reschedule_dates_kb(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("reschedule_confirm_yes:"))
+async def client_reschedule_confirm(callback: CallbackQuery, state: FSMContext) -> None:
+    booking_id = int(callback.data.split(":")[1])
+    pair = await get_booking_with_client(booking_id)
+    if not pair or pair[1].telegram_id != callback.from_user.id:
+        await callback.answer("⛔ Нет доступа.", show_alert=True)
+        return
+
+    data = await state.get_data()
+    new_date  = data.get("rs_new_date", "")
+    new_time  = data.get("rs_new_time", "")
+    new_hours = int(data.get("rs_new_hours", 1))
+    old_date  = data.get("rs_old_date", "—")
+    old_time  = data.get("rs_old_time", "—")
+    await state.clear()
+
+    await reschedule_client_booking(booking_id, new_date, new_time, new_hours)
+
+    start_h = int(new_time.split(":")[0])
+    end_h   = start_h + new_hours
+
+    await callback.message.edit_text(
+        f"✅ <b>Перенос подтверждён!</b>\n\n"
+        f"├ 📅 Новая дата: <b>{new_date}</b>\n"
+        f"├ 🕐 Время: <b>{start_h:02d}:00 – {end_h:02d}:00</b>\n"
+        f"└ ⏱ Длительность: <b>{new_hours} ч</b>\n\n"
+        "Ждём вас в студии «Сокольники»! 🎙",
+        parse_mode="HTML",
+    )
+
+    # Notify admin
+    booking, client = pair
+    tg = f"@{client.username}" if client.username else f"<code>{client.telegram_id}</code>"
+    try:
+        await callback.bot.send_message(
+            ADMIN_ID,
+            f"🔄 <b>Клиент перенёс бронь #{booking_id}</b>\n\n"
+            f"├ 👤 {booking.guest_name or client.name or '—'} ({tg})\n"
+            f"├ 📅 Было: <b>{old_date} в {old_time}</b>\n"
+            f"└ 📅 Стало: <b>{new_date} в {new_time}</b> · {new_hours} ч",
+            parse_mode="HTML",
+            link_preview_options=NO_PREVIEW,
+        )
+    except Exception as e:
+        logger.error(f"Admin reschedule notify failed: {e}")
+
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("reschedule_confirm_no:"))
+async def client_reschedule_cancel(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    booking_id = int(callback.data.split(":")[1])
+    await callback.message.edit_text(
+        "❌ Перенос отменён.",
+        parse_mode="HTML",
+    )
+    await callback.answer()
+    # Return to booking detail
+    await callback.message.answer(
+        "Открываю карточку брони...",
+        link_preview_options=NO_PREVIEW,
+    )
+    # Simulate re-open by posting a new detail message
+    pair = await get_booking_with_client(booking_id)
+    if pair:
+        booking, _ = pair
+        status_label = CLIENT_STATUS_LABELS.get(booking.status, booking.status)
+        hours_str = f"{int(booking.booking_hours)} ч" if booking.booking_hours else "—"
+        time_range = booking.booking_time or "—"
+        if booking.booking_time and booking.booking_hours:
+            try:
+                sh = int(booking.booking_time.split(":")[0])
+                eh = sh + booking.booking_hours
+                time_range = f"{sh:02d}:00 – {eh:02d}:00"
+            except Exception:
+                pass
+        text = (
+            f"📋 <b>Бронь #{booking.id}</b>\n\n"
+            f"├ 🎬 Контент: {booking.content_type or '—'}\n"
+            f"├ 📅 Дата: {booking.booking_date or '—'}\n"
+            f"├ 🕐 Время: {time_range}\n"
+            f"├ ⏱ Длительность: {hours_str}\n"
+            f"└ 📊 Статус: {status_label}"
+        )
+        can_act = booking.status in {"new_request", "lead", "confirmed",
+                                     "recorded", "paid", "rescheduled_done"}
+        await callback.message.answer(
+            text, parse_mode="HTML",
+            reply_markup=my_booking_item_kb(booking.id, can_cancel=can_act, can_reschedule=can_act),
+        )
 
 
 # ─── PRICES ───────────────────────────────────────────────────────────────────
