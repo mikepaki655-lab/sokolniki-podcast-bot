@@ -23,6 +23,7 @@ def main_menu() -> ReplyKeyboardMarkup:
         KeyboardButton(text="📍 Адрес студии"),
     )
     builder.row(KeyboardButton(text="📅 Мои брони"))
+    builder.row(KeyboardButton(text="📩 Написать нам"))
     return builder.as_markup(resize_keyboard=True)
 
 
