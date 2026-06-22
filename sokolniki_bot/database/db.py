@@ -254,29 +254,28 @@ async def update_booking_status(booking_id: int, **kwargs) -> Booking | None:
 
 
 async def get_analytics(days: int = 7) -> dict:
-    from sqlalchemy import func as sqlfunc
-    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-    cutoff_str = (datetime.now() - timedelta(days=days)).strftime("%d.%m.%Y")
+    from sqlalchemy import func as sqlfunc, text
+
+    # Даты хранятся как DD.MM.YYYY — лексикографическое сравнение некорректно.
+    # Конвертируем в YYYYMMDD через substr() SQLite для правильного сравнения диапазона.
+    cutoff_ymd = (datetime.now() - timedelta(days=days)).strftime("%Y%m%d")
+    date_ok = text(
+        "booking_date IS NOT NULL AND "
+        "substr(booking_date,7,4)||substr(booking_date,4,2)||substr(booking_date,1,2) >= :cutoff"
+    ).bindparams(cutoff=cutoff_ymd)
 
     async with async_session() as session:
-        def _cnt(q): return session.execute(q)
-
-        new_q    = select(sqlfunc.count()).select_from(Booking).where(
-            Booking.status.in_({"new_request", "lead"}),
-            Booking.booking_date >= cutoff_str)
-        proc_q   = select(sqlfunc.count()).select_from(Booking).where(
-            Booking.status.in_({"confirmed", "recorded", "paid"}),
-            Booking.booking_date >= cutoff_str)
-        done_q   = select(sqlfunc.count()).select_from(Booking).where(
-            Booking.status == "done_paid",
-            Booking.booking_date >= cutoff_str)
-        rev_q    = select(sqlfunc.sum(Booking.payment_amount)).where(
-            Booking.status == "done_paid",
-            Booking.booking_date >= cutoff_str,
+        new_q   = select(sqlfunc.count()).select_from(Booking).where(
+            Booking.status.in_({"new_request", "lead"}), date_ok)
+        proc_q  = select(sqlfunc.count()).select_from(Booking).where(
+            Booking.status.in_({"confirmed", "recorded", "paid"}), date_ok)
+        done_q  = select(sqlfunc.count()).select_from(Booking).where(
+            Booking.status == "done_paid", date_ok)
+        rev_q   = select(sqlfunc.sum(Booking.payment_amount)).select_from(Booking).where(
+            Booking.status == "done_paid", date_ok,
             Booking.payment_amount.isnot(None))
-        hours_q  = select(sqlfunc.sum(Booking.payment_hours)).where(
-            Booking.status == "done_paid",
-            Booking.booking_date >= cutoff_str,
+        hours_q = select(sqlfunc.sum(Booking.payment_hours)).select_from(Booking).where(
+            Booking.status == "done_paid", date_ok,
             Booking.payment_hours.isnot(None))
 
         new_cnt  = (await session.execute(new_q)).scalar_one()  or 0
