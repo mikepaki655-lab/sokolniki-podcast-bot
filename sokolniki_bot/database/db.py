@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta, timezone
-from sqlalchemy import select
+from sqlalchemy import select, text as sa_text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from database.models import Base, Booking, Client, SectionContent
 
@@ -112,6 +112,15 @@ def _migrate(conn):
             # Refresh inspector after table rebuild
             inspector = sa.inspect(conn)
             tables = inspector.get_table_names()
+
+    # ── Admins table ──────────────────────────────────────────────────────────
+    conn.execute(sa.text("""
+        CREATE TABLE IF NOT EXISTS admins (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            username   VARCHAR(100) NOT NULL UNIQUE,
+            added_at   DATETIME    DEFAULT CURRENT_TIMESTAMP
+        )
+    """))
 
     # ── Remove deprecated "free" content section ──────────────────────────────
     if "section_content" in tables:
@@ -231,6 +240,39 @@ async def create_booking(client_id: int, data: dict) -> Booking:
         await session.commit()
         await session.refresh(booking)
         return booking
+
+
+async def get_all_admin_usernames() -> list[str]:
+    """Return list of extra admin usernames from DB (lowercase, without @)."""
+    async with async_session() as session:
+        result = await session.execute(sa_text("SELECT username FROM admins ORDER BY added_at"))
+        return [row[0] for row in result.fetchall()]
+
+
+async def add_admin_username(username: str) -> bool:
+    """Add admin by username. Returns True if added, False if already exists."""
+    uname = username.lstrip("@").lower()
+    async with async_session() as session:
+        try:
+            await session.execute(
+                sa_text("INSERT OR IGNORE INTO admins (username) VALUES (:u)"),
+                {"u": uname},
+            )
+            await session.commit()
+            return True
+        except Exception:
+            return False
+
+
+async def remove_admin_username(username: str) -> bool:
+    """Remove admin by username. Returns True if removed."""
+    uname = username.lstrip("@").lower()
+    async with async_session() as session:
+        result = await session.execute(
+            sa_text("DELETE FROM admins WHERE username = :u"), {"u": uname}
+        )
+        await session.commit()
+        return result.rowcount > 0
 
 
 async def get_client_bookings(telegram_id: int) -> list[Booking]:
