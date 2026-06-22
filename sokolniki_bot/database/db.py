@@ -66,18 +66,6 @@ DEFAULTS: list[dict] = [
             "└ Часы работы: 10:00 — 20:00 (24/7 по запросу)"
         ),
     },
-    {
-        "key": "free",
-        "title": "🔥 Первый выпуск бесплатно",
-        "local_banner": "banner_free.png",
-        "text": (
-            "🔥 <b>Первый выпуск бесплатно</b>\n"
-            "├ Аренда студии на 2 часа\n"
-            "├ Съёмка на профессиональное оборудование\n"
-            "│  (камеры, микрофоны, свет)\n"
-            "└ Только для новых клиентов студии"
-        ),
-    },
 ]
 
 
@@ -124,6 +112,10 @@ def _migrate(conn):
             # Refresh inspector after table rebuild
             inspector = sa.inspect(conn)
             tables = inspector.get_table_names()
+
+    # ── Remove deprecated "free" content section ──────────────────────────────
+    if "section_content" in tables:
+        conn.execute(sa.text("DELETE FROM section_content WHERE key = 'free'"))
 
     # ── Add missing columns to bookings ───────────────────────────────────────
     if "bookings" in tables:
@@ -241,14 +233,54 @@ async def create_booking(client_id: int, data: dict) -> Booking:
         return booking
 
 
+async def get_client_bookings(telegram_id: int) -> list[Booking]:
+    """All non-cancelled bookings for a client (newest first)."""
+    async with async_session() as session:
+        result = await session.execute(
+            select(Booking)
+            .join(Client, Booking.client_id == Client.id)
+            .where(
+                Client.telegram_id == telegram_id,
+                Booking.status.not_in(["cancelled"]),
+            )
+            .order_by(Booking.created_at.desc())
+        )
+        return list(result.scalars().all())
+
+
+async def cancel_booking(booking_id: int, reason: str | None = None) -> Booking | None:
+    """Mark booking as cancelled with optional reason."""
+    async with async_session() as session:
+        booking = await session.get(Booking, booking_id)
+        if booking:
+            booking.status = "cancelled"
+            booking.status_note = reason
+            await session.commit()
+            await session.refresh(booking)
+        return booking
+
+
+async def delete_booking(booking_id: int) -> bool:
+    """Permanently delete a booking record. Returns True if deleted."""
+    async with async_session() as session:
+        booking = await session.get(Booking, booking_id)
+        if booking:
+            await session.delete(booking)
+            await session.commit()
+            return True
+        return False
+
+
 async def get_booked_hours(date_str: str) -> set[int]:
-    """Return blocked hour-ints for a date (booking duration + 1 buffer hour)."""
+    """Return blocked hour-ints for a date (booking duration + 1 buffer hour).
+    Slots are freed only when booking is cancelled or rescheduled (reschedule_from set + new date).
+    """
     blocked: set[int] = set()
     async with async_session() as session:
         result = await session.execute(
             select(Booking).where(
                 Booking.booking_date == date_str,
-                Booking.status.not_in(["done_paid", "done_no_pay"]),
+                Booking.status.not_in(["cancelled"]),
                 Booking.booking_time.isnot(None),
                 Booking.booking_hours.isnot(None),
             )
