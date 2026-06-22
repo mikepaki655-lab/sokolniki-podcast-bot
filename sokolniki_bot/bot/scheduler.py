@@ -27,8 +27,7 @@ async def send_reminders(bot: Bot) -> None:
                 f"├ 🕐 Время: <b>{booking.booking_time}</b>\n"
                 f"├ ⏱ Длительность: <b>{booking.booking_hours} ч</b>\n"
                 "└ 📍 г. Москва, Песочный пер., дом 3\n\n"
-                "Ждём вас в студии «Сокольники»! 🎙\n"
-                "Если нужно перенести — напишите нам заранее."
+                "Ждём вас в студии «Сокольники»! 🎙"
             )
             await bot.send_message(
                 client.telegram_id, text,
