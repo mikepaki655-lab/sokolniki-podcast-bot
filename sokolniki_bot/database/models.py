@@ -28,7 +28,9 @@ class Booking(Base):
 
     id:              Mapped[int]         = mapped_column(Integer, primary_key=True, autoincrement=True)
     client_id:       Mapped[int]         = mapped_column(Integer, ForeignKey("clients.id"), index=True)
-    lead_type:       Mapped[str]         = mapped_column(String(30), default="booking")   # booking | free_episode
+    guest_name:      Mapped[str | None]  = mapped_column(String(200), nullable=True)   # name entered at booking time
+    guest_phone:     Mapped[str | None]  = mapped_column(String(50),  nullable=True)   # phone entered at booking time
+    lead_type:       Mapped[str]         = mapped_column(String(30), default="booking")
     content_type:    Mapped[str | None]  = mapped_column(String(100), nullable=True)
     booking_date:    Mapped[str | None]  = mapped_column(String(20),  nullable=True)      # DD.MM.YYYY
     booking_time:    Mapped[str | None]  = mapped_column(String(10),  nullable=True)      # HH:00
