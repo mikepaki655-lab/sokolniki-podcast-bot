@@ -11,12 +11,12 @@ from sqlalchemy import select
 
 from bot.keyboards import (
     cancel_kb, content_type_kb, dates_kb, hours_kb,
-    main_menu, phone_request_kb, prices_kb, remove_kb, times_kb,
+    main_menu, phone_request_kb, prices_kb, remove_kb, slot_conflict_kb, times_kb,
 )
 from bot.states import BookingForm
 from config import ADMIN_ID
 from database.db import (
-    async_session, create_booking, get_booked_hours,
+    async_session, create_booking, get_booked_hours, get_max_available_hours,
     get_content, get_or_create_client,
 )
 from database.models import Client
@@ -94,11 +94,24 @@ async def _start_booking(msg: Message, state: FSMContext, lead_type: str = "book
     await state.clear()
     await state.update_data(lead_type=lead_type)
     await state.set_state(BookingForm.name)
-    section_key = "booking" if lead_type == "booking" else "free"
-    await send_section(msg, section_key)
-    await msg.answer("👤 <b>Как вас зовут?</b>",
-                     parse_mode="HTML", reply_markup=cancel_kb(),
-                     link_preview_options=NO_PREVIEW)
+
+    caption = "🎙 <b>Студия «Сокольники»</b>\n\n👤 Как вас зовут?"
+    section = await get_content("booking")
+    photo_sent = False
+    if section:
+        if section.photo_file_id:
+            try:
+                await msg.answer_photo(section.photo_file_id, caption=caption, parse_mode="HTML")
+                photo_sent = True
+            except Exception:
+                pass
+        if not photo_sent and section.local_banner:
+            path = os.path.join(IMAGES_DIR, section.local_banner)
+            if os.path.exists(path):
+                await msg.answer_photo(FSInputFile(path), caption=caption, parse_mode="HTML")
+                photo_sent = True
+    if not photo_sent:
+        await msg.answer(caption, parse_mode="HTML", link_preview_options=NO_PREVIEW)
 
 
 @router.message(F.text.in_({"🏠 Забронировать студию", "🎬 Записать подкаст"}))
@@ -167,10 +180,59 @@ async def booking_time(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
 
 
+@router.callback_query(BookingForm.hours, F.data == "back_to_time")
+async def conflict_back_to_time(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    await state.set_state(BookingForm.time)
+    blocked = await get_booked_hours(data.get("date", ""))
+    await callback.message.edit_text(
+        f"✅ {data.get('date')}\n\n🕐 <b>Выберите время начала:</b>",
+        parse_mode="HTML", reply_markup=times_kb(blocked),
+    )
+    await callback.answer()
+
+
+@router.callback_query(BookingForm.hours, F.data == "back_to_date")
+async def conflict_back_to_date(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    await state.set_state(BookingForm.date)
+    await callback.message.edit_text(
+        f"✅ {data.get('content_type', '')}\n\n📅 <b>Выберите желаемую дату:</b>",
+        parse_mode="HTML", reply_markup=dates_kb(),
+    )
+    await callback.answer()
+
+
 @router.callback_query(BookingForm.hours, F.data.startswith("bhours:"))
 async def booking_hours(callback: CallbackQuery, state: FSMContext) -> None:
-    hours = callback.data.split(":", 1)[1]
-    await state.update_data(hours=int(hours))
+    hours = int(callback.data.split(":", 1)[1])
+    data  = await state.get_data()
+    chosen_date = data.get("date", "")
+    chosen_time = data.get("time", "")
+
+    # Check if the chosen slot fits without overlapping existing bookings
+    if chosen_date and chosen_time:
+        start_hour = int(chosen_time.split(":")[0])
+        available  = await get_max_available_hours(chosen_date, start_hour, hours)
+        if available < hours:
+            if available == 0:
+                msg_text = (
+                    f"⚠️ Время <b>{chosen_time}</b> на <b>{chosen_date}</b> уже занято.\n\n"
+                    "Пожалуйста, выберите другое время или дату 👇"
+                )
+            else:
+                noun = "час" if available == 1 else "часа" if available < 5 else "часов"
+                msg_text = (
+                    f"⚠️ На <b>{chosen_date}</b> в <b>{chosen_time}</b> бронь возможна "
+                    f"только на <b>{available} {noun}</b> — дальше студия занята.\n\n"
+                    "Выберите другое время / дату или возьмите доступное время 👇"
+                )
+            await callback.message.edit_text(msg_text, parse_mode="HTML",
+                                             reply_markup=slot_conflict_kb(available))
+            await callback.answer()
+            return
+
+    await state.update_data(hours=hours)
     await state.set_state(BookingForm.phone)
     await callback.message.answer(
         f"✅ {hours} ч\n\n📱 <b>Укажите ваш номер телефона:</b>\n"
