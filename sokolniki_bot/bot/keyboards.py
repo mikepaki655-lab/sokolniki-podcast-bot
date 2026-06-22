@@ -182,6 +182,18 @@ def prices_kb() -> InlineKeyboardMarkup:
 
 
 
+def slot_conflict_kb(max_hours: int = 0) -> InlineKeyboardMarkup:
+    """Buttons shown when chosen time+duration overlaps an existing booking."""
+    builder = InlineKeyboardBuilder()
+    if max_hours > 0:
+        noun = "час" if max_hours == 1 else "часа" if max_hours < 5 else "часов"
+        builder.button(text=f"✅ Взять {max_hours} {noun}", callback_data=f"bhours:{max_hours}")
+    builder.button(text="🕐 Другое время", callback_data="back_to_time")
+    builder.button(text="📅 Другая дата",  callback_data="back_to_date")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
 def cancel_kb() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="❌ Отмена", callback_data="cancel")
