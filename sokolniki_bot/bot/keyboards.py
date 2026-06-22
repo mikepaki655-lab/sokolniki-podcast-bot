@@ -36,8 +36,17 @@ def admin_main_menu() -> ReplyKeyboardMarkup:
         KeyboardButton(text="📊 Аналитика"),
     )
     builder.row(KeyboardButton(text="📝 Контент"))
+    builder.row(KeyboardButton(text="🔧 Управление Админкой"))
     builder.row(KeyboardButton(text="◀️ Вернуться в бота"))
     return builder.as_markup(resize_keyboard=True)
+
+
+def manage_admins_kb() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="➕ Добавить Админа", callback_data="admin_manage:add")
+    builder.button(text="❌ Удалить Админа",  callback_data="admin_manage:remove")
+    builder.adjust(1)
+    return builder.as_markup()
 
 
 def admin_bookings_menu() -> ReplyKeyboardMarkup:
