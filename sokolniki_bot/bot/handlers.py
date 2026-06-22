@@ -1,5 +1,6 @@
 import logging
 import os
+from datetime import date, datetime, timezone, timedelta
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
@@ -10,13 +11,15 @@ from aiogram.types import (
 from sqlalchemy import select
 
 from bot.keyboards import (
-    cancel_kb, content_type_kb, dates_kb, hours_kb,
-    main_menu, phone_request_kb, prices_kb, remove_kb, slot_conflict_kb, times_kb,
+    cancel_kb, confirm_client_cancel_kb, content_type_kb, dates_kb, hours_kb,
+    main_menu, my_bookings_menu_kb, my_booking_done_item_kb, my_booking_item_kb,
+    phone_request_kb, prices_kb, remove_kb, skip_reason_kb, slot_conflict_kb, times_kb,
 )
-from bot.states import BookingForm
+from bot.states import BookingForm, MyBookingsState
 from config import ADMIN_ID
 from database.db import (
-    async_session, create_booking, get_booked_hours, get_max_available_hours,
+    async_session, cancel_booking, create_booking, get_booked_hours,
+    get_client_bookings, get_booking_with_client, get_max_available_hours,
     get_content, get_or_create_client,
 )
 from database.models import Client
@@ -26,6 +29,26 @@ logger = logging.getLogger(__name__)
 
 IMAGES_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "images")
 NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
+
+MOSCOW_TZ = timezone(timedelta(hours=3))
+
+# Status labels shown to the client in "Мои брони"
+CLIENT_STATUS_LABELS = {
+    "new_request":      "⏳ Ждёт подтверждения от администратора",
+    "lead":             "⏳ Ждёт подтверждения от администратора",
+    "confirmed":        "✅ Подтверждена",
+    "recorded":         "🎙 Ждём вас в студии",
+    "paid":             "🎙 Ждём вас в студии",
+    "done_no_pay":      "🔄 Услуга оказана, в ожидании оплаты",
+    "rescheduled_done": "🔄 Перенесена — ждём подтверждения",
+    "done_paid":        "✅ Завершена",
+}
+
+# Active statuses shown in "Активные" (everything except done_paid)
+ACTIVE_STATUSES = {"new_request", "lead", "confirmed", "recorded", "paid",
+                   "done_no_pay", "rescheduled_done"}
+# Only done_paid goes to "Завершённые"
+DONE_CLIENT_STATUSES = {"done_paid"}
 
 
 # ─── UTILS ────────────────────────────────────────────────────────────────────
@@ -63,6 +86,23 @@ def _validate_phone(text: str) -> str | None:
     if len(digits) < 10:
         return None
     return text.strip()
+
+
+def _today_min_hour() -> int:
+    """Minimum bookable hour for today (Moscow time).
+    Formula: current_hour + 2 if minutes > 0, else current_hour + 1.
+    Example: 12:16 → min_hour=14; 14:00 → min_hour=15.
+    """
+    now = datetime.now(MOSCOW_TZ)
+    return now.hour + (2 if now.minute > 0 else 1)
+
+
+def _is_today(date_str: str) -> bool:
+    """Check if DD.MM.YYYY string equals today (Moscow)."""
+    try:
+        return date_str == datetime.now(MOSCOW_TZ).strftime("%d.%m.%Y")
+    except Exception:
+        return False
 
 
 # ─── /start ───────────────────────────────────────────────────────────────────
@@ -158,9 +198,10 @@ async def booking_date(callback: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(date=chosen_date)
     await state.set_state(BookingForm.time)
     blocked = await get_booked_hours(chosen_date)
+    min_hour = _today_min_hour() if _is_today(chosen_date) else 0
     await callback.message.edit_text(
         f"✅ {chosen_date}\n\n🕐 <b>Выберите время начала:</b>",
-        parse_mode="HTML", reply_markup=times_kb(blocked))
+        parse_mode="HTML", reply_markup=times_kb(blocked, min_hour=min_hour))
     await callback.answer()
 
 
@@ -184,10 +225,12 @@ async def booking_time(callback: CallbackQuery, state: FSMContext) -> None:
 async def conflict_back_to_time(callback: CallbackQuery, state: FSMContext) -> None:
     data = await state.get_data()
     await state.set_state(BookingForm.time)
-    blocked = await get_booked_hours(data.get("date", ""))
+    chosen_date = data.get("date", "")
+    blocked = await get_booked_hours(chosen_date)
+    min_hour = _today_min_hour() if _is_today(chosen_date) else 0
     await callback.message.edit_text(
-        f"✅ {data.get('date')}\n\n🕐 <b>Выберите время начала:</b>",
-        parse_mode="HTML", reply_markup=times_kb(blocked),
+        f"✅ {chosen_date}\n\n🕐 <b>Выберите время начала:</b>",
+        parse_mode="HTML", reply_markup=times_kb(blocked, min_hour=min_hour),
     )
     await callback.answer()
 
@@ -324,6 +367,282 @@ async def _finish_booking(message: Message, state: FSMContext, phone: str) -> No
                                        link_preview_options=NO_PREVIEW)
     except Exception as e:
         logger.error(f"Admin notify failed: {e}")
+
+
+# ─── МОИ БРОНИ ────────────────────────────────────────────────────────────────
+
+@router.message(F.text == "📅 Мои брони")
+async def my_bookings(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer(
+        "📅 <b>Мои брони</b>\n└ Выберите раздел:",
+        parse_mode="HTML",
+        reply_markup=my_bookings_menu_kb(),
+        link_preview_options=NO_PREVIEW,
+    )
+
+
+@router.callback_query(F.data == "my_bookings:active")
+async def my_bookings_active(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    bookings = await get_client_bookings(callback.from_user.id)
+    active = [b for b in bookings if b.status in ACTIVE_STATUSES]
+
+    if not active:
+        await callback.message.edit_text(
+            "📋 <b>Активные брони</b>\n\n└ У вас нет активных броней.",
+            parse_mode="HTML",
+            reply_markup=my_bookings_menu_kb(),
+        )
+        await callback.answer()
+        return
+
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    builder = InlineKeyboardBuilder()
+    for b in active:
+        status_label = CLIENT_STATUS_LABELS.get(b.status, b.status)
+        date_part = f" {b.booking_date}" if b.booking_date else ""
+        label = f"#{b.id}{date_part} · {status_label}"
+        builder.button(text=label[:60], callback_data=f"my_booking_detail:{b.id}")
+    builder.button(text="◀️ Назад", callback_data="my_bookings:menu")
+    builder.adjust(1)
+
+    await callback.message.edit_text(
+        f"📋 <b>Активные брони</b> ({len(active)})\n└ Выберите для подробностей:",
+        parse_mode="HTML",
+        reply_markup=builder.as_markup(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "my_bookings:done")
+async def my_bookings_done(callback: CallbackQuery) -> None:
+    bookings = await get_client_bookings(callback.from_user.id)
+    done = [b for b in bookings if b.status in DONE_CLIENT_STATUSES]
+
+    if not done:
+        await callback.message.edit_text(
+            "✅ <b>Завершённые брони</b>\n\n└ Завершённых броней пока нет.",
+            parse_mode="HTML",
+            reply_markup=my_bookings_menu_kb(),
+        )
+        await callback.answer()
+        return
+
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    builder = InlineKeyboardBuilder()
+    for b in done:
+        date_part = f" {b.booking_date}" if b.booking_date else ""
+        amount_part = f" · {int(b.payment_amount):,} ₽" if b.payment_amount else ""
+        label = f"#{b.id}{date_part}{amount_part}"
+        builder.button(text=label[:60], callback_data=f"my_booking_done_detail:{b.id}")
+    builder.button(text="◀️ Назад", callback_data="my_bookings:menu")
+    builder.adjust(1)
+
+    await callback.message.edit_text(
+        f"✅ <b>Завершённые брони</b> ({len(done)})\n└ Выберите для подробностей:",
+        parse_mode="HTML",
+        reply_markup=builder.as_markup(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "my_bookings:menu")
+async def my_bookings_menu_cb(callback: CallbackQuery) -> None:
+    await callback.message.edit_text(
+        "📅 <b>Мои брони</b>\n└ Выберите раздел:",
+        parse_mode="HTML",
+        reply_markup=my_bookings_menu_kb(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("my_booking_detail:"))
+async def my_booking_detail(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    booking_id = int(callback.data.split(":")[1])
+    pair = await get_booking_with_client(booking_id)
+    if not pair:
+        await callback.answer("Бронь не найдена.", show_alert=True)
+        return
+    booking, client = pair
+
+    # Security: only the booking owner can view
+    if client.telegram_id != callback.from_user.id:
+        await callback.answer("⛔ Нет доступа.", show_alert=True)
+        return
+
+    status_label = CLIENT_STATUS_LABELS.get(booking.status, booking.status)
+    hours_str = f"{int(booking.booking_hours)} ч" if booking.booking_hours else "—"
+
+    # Compute end time if possible
+    time_range = booking.booking_time or "—"
+    if booking.booking_time and booking.booking_hours:
+        try:
+            sh = int(booking.booking_time.split(":")[0])
+            eh = sh + booking.booking_hours
+            time_range = f"{sh:02d}:00 – {eh:02d}:00"
+        except Exception:
+            pass
+
+    text = (
+        f"📋 <b>Бронь #{booking.id}</b>\n\n"
+        f"├ 🎬 Контент: {booking.content_type or '—'}\n"
+        f"├ 📅 Дата: {booking.booking_date or '—'}\n"
+        f"├ 🕐 Время: {time_range}\n"
+        f"├ ⏱ Длительность: {hours_str}\n"
+        f"└ 📊 Статус: {status_label}"
+    )
+
+    can_cancel = booking.status in {"new_request", "lead", "confirmed",
+                                    "recorded", "paid", "rescheduled_done"}
+    await callback.message.edit_text(
+        text, parse_mode="HTML",
+        reply_markup=my_booking_item_kb(booking.id, can_cancel=can_cancel),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("my_booking_done_detail:"))
+async def my_booking_done_detail(callback: CallbackQuery) -> None:
+    booking_id = int(callback.data.split(":")[1])
+    pair = await get_booking_with_client(booking_id)
+    if not pair:
+        await callback.answer("Бронь не найдена.", show_alert=True)
+        return
+    booking, client = pair
+
+    if client.telegram_id != callback.from_user.id:
+        await callback.answer("⛔ Нет доступа.", show_alert=True)
+        return
+
+    hours_str = f"{int(booking.booking_hours)} ч" if booking.booking_hours else "—"
+    amount_str = f"{int(booking.payment_amount):,} ₽" if booking.payment_amount else "—"
+
+    time_range = booking.booking_time or "—"
+    if booking.booking_time and booking.booking_hours:
+        try:
+            sh = int(booking.booking_time.split(":")[0])
+            eh = sh + booking.booking_hours
+            time_range = f"{sh:02d}:00 – {eh:02d}:00"
+        except Exception:
+            pass
+
+    text = (
+        f"✅ <b>Завершённая бронь #{booking.id}</b>\n\n"
+        f"├ 🎬 Контент: {booking.content_type or '—'}\n"
+        f"├ 📅 Дата: {booking.booking_date or '—'}\n"
+        f"├ 🕐 Время: {time_range}\n"
+        f"├ ⏱ Длительность: {hours_str}\n"
+        f"└ 💰 Оплата: {amount_str}"
+    )
+    await callback.message.edit_text(
+        text, parse_mode="HTML",
+        reply_markup=my_booking_done_item_kb(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("cancel_booking:"))
+async def cancel_booking_ask(callback: CallbackQuery) -> None:
+    booking_id = int(callback.data.split(":")[1])
+    await callback.message.edit_text(
+        f"❓ <b>Вы уверены, что хотите отменить бронь #{booking_id}?</b>\n\n"
+        "После отмены слот освободится для других гостей.",
+        parse_mode="HTML",
+        reply_markup=confirm_client_cancel_kb(booking_id),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("cancel_booking_yes:"))
+async def cancel_booking_confirmed(callback: CallbackQuery, state: FSMContext) -> None:
+    booking_id = int(callback.data.split(":")[1])
+
+    # Verify ownership
+    pair = await get_booking_with_client(booking_id)
+    if not pair or pair[1].telegram_id != callback.from_user.id:
+        await callback.answer("⛔ Нет доступа.", show_alert=True)
+        return
+
+    # Cancel the booking
+    await cancel_booking(booking_id)
+
+    # Store booking_id for admin notification after reason is collected
+    await state.update_data(cancelled_booking_id=booking_id,
+                            cancelled_booking_date=pair[0].booking_date or "—",
+                            cancelled_booking_time=pair[0].booking_time or "—",
+                            cancelled_client_name=pair[0].guest_name or pair[1].name or "—",
+                            cancelled_client_phone=pair[0].guest_phone or pair[1].phone or "—")
+    await state.set_state(MyBookingsState.cancel_reason)
+
+    await callback.message.edit_text(
+        "😔 <b>Нам жаль, что вы отменили бронирование.</b>\n\n"
+        "Надеемся, вы вскоре снова вернётесь к нам! 🎙\n\n"
+        "Если есть причина, которую вы хотите нам сообщить,\n"
+        "напишите её в сообщении ниже.\n"
+        "Или нажмите «Пропустить».",
+        parse_mode="HTML",
+        reply_markup=skip_reason_kb(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "cancel_reason_skip")
+async def cancel_reason_skip(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    await state.clear()
+    await _send_cancel_admin_notify(callback.bot, data, reason=None,
+                                   username=callback.from_user.username,
+                                   tg_id=callback.from_user.id)
+    await callback.message.edit_text(
+        "✅ <b>Бронирование отменено.</b>\n\n"
+        "Ждём вас снова в студии «Сокольники»! 🎙",
+        parse_mode="HTML",
+    )
+    await callback.answer()
+    await callback.message.answer("Выберите раздел 👇",
+                                  reply_markup=main_menu(), link_preview_options=NO_PREVIEW)
+
+
+@router.message(MyBookingsState.cancel_reason)
+async def cancel_reason_text(message: Message, state: FSMContext) -> None:
+    reason = message.text.strip() if message.text else ""
+    data = await state.get_data()
+    await state.clear()
+    await _send_cancel_admin_notify(message.bot, data, reason=reason or None,
+                                   username=message.from_user.username,
+                                   tg_id=message.from_user.id)
+    await message.answer(
+        "✅ <b>Спасибо за сообщение!</b>\n\nОтветим вам в ближайшее время. 📩",
+        parse_mode="HTML",
+        reply_markup=main_menu(),
+        link_preview_options=NO_PREVIEW,
+    )
+
+
+async def _send_cancel_admin_notify(bot, data: dict, reason: str | None,
+                                    username: str | None, tg_id: int) -> None:
+    booking_id = data.get("cancelled_booking_id", "?")
+    bdate      = data.get("cancelled_booking_date", "—")
+    btime      = data.get("cancelled_booking_time", "—")
+    cname      = data.get("cancelled_client_name", "—")
+    cphone     = data.get("cancelled_client_phone", "—")
+    tg         = f"@{username}" if username else f"<code>{tg_id}</code>"
+    reason_line = f"\n└ 💬 Причина: {reason}" if reason else "\n└ 💬 Причина: не указана"
+
+    text = (
+        f"❌ <b>Клиент отменил бронирование #{booking_id}</b>\n\n"
+        f"├ 👤 {cname} ({tg})\n"
+        f"├ 📱 {cphone}\n"
+        f"├ 📅 Дата: {bdate} в {btime}"
+        f"{reason_line}"
+    )
+    try:
+        await bot.send_message(ADMIN_ID, text, parse_mode="HTML",
+                               link_preview_options=NO_PREVIEW)
+    except Exception as e:
+        logger.error(f"Admin cancel notify failed: {e}")
 
 
 # ─── PRICES ───────────────────────────────────────────────────────────────────
