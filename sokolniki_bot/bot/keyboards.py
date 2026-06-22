@@ -127,8 +127,6 @@ def phone_request_kb() -> ReplyKeyboardMarkup:
 def new_booking_actions_kb(booking_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="✅ Подтвердить бронирование", callback_data=f"bstatus:{booking_id}:confirmed")
-    builder.button(text="🎬 Записал видео",            callback_data=f"bstatus:{booking_id}:recorded")
-    builder.button(text="💰 Оплатил",                  callback_data=f"bstatus:{booking_id}:paid")
     builder.adjust(1)
     return builder.as_markup()
 
