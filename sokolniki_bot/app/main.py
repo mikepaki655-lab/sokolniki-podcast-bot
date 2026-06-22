@@ -9,11 +9,12 @@ from aiogram import Bot, Dispatcher
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import BotCommand
 
 from config import BOT_TOKEN
-from database.db import init_db
+from database.db import init_db, get_all_admin_usernames
 from bot.handlers import router as user_router
-from bot.admin import router as admin_router
+from bot.admin import router as admin_router, load_extra_admins
 from bot.scheduler import reminder_loop
 
 logging.basicConfig(
@@ -28,10 +29,22 @@ async def main() -> None:
     await init_db()
     logger.info("Database initialized")
 
+    # Load extra admin usernames into memory
+    extra_admins = await get_all_admin_usernames()
+    load_extra_admins(extra_admins)
+    logger.info("Extra admins loaded: %d", len(extra_admins))
+
     bot = Bot(
         token=BOT_TOKEN,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
+
+    # Set command menu (the "/" button in Telegram)
+    await bot.set_my_commands([
+        BotCommand(command="start",  description="Главное меню"),
+        BotCommand(command="cancel", description="Отмена действия"),
+        BotCommand(command="admin",  description="Панель управления"),
+    ])
 
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(admin_router)
