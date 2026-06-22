@@ -29,3 +29,7 @@ class AdminAction(StatesGroup):
 class EditContentFSM(StatesGroup):
     edit_text  = State()
     edit_photo = State()
+
+
+class MyBookingsState(StatesGroup):
+    cancel_reason = State()
