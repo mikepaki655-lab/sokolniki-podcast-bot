@@ -22,6 +22,7 @@ def main_menu() -> ReplyKeyboardMarkup:
         KeyboardButton(text="💰 Узнать цены"),
         KeyboardButton(text="📍 Адрес студии"),
     )
+    builder.row(KeyboardButton(text="📅 Мои брони"))
     return builder.as_markup(resize_keyboard=True)
 
 
@@ -88,11 +89,11 @@ def dates_kb() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def times_kb(blocked: set[int] | None = None) -> InlineKeyboardMarkup:
-    """00:00–23:00, skips blocked hours."""
+def times_kb(blocked: set[int] | None = None, min_hour: int = 0) -> InlineKeyboardMarkup:
+    """00:00–23:00, skips blocked hours and hours before min_hour."""
     blocked = blocked or set()
     builder = InlineKeyboardBuilder()
-    free = [h for h in range(24) if h not in blocked]
+    free = [h for h in range(max(0, min_hour), 24) if h not in blocked]
     if free:
         for h in free:
             builder.button(text=f"{h:02d}:00", callback_data=f"btime:{h:02d}:00")
@@ -127,6 +128,7 @@ def phone_request_kb() -> ReplyKeyboardMarkup:
 def new_booking_actions_kb(booking_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="✅ Подтвердить бронирование", callback_data=f"bstatus:{booking_id}:confirmed")
+    builder.button(text="🗑 Удалить заявку",           callback_data=f"del_booking:{booking_id}")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -136,7 +138,62 @@ def processing_booking_actions_kb(booking_id: int) -> InlineKeyboardMarkup:
     builder.button(text="✅ Завершена с оплатой",  callback_data=f"bstatus:{booking_id}:done_paid")
     builder.button(text="❌ Завершена без оплаты", callback_data=f"bstatus:{booking_id}:done_no_pay")
     builder.button(text="🔄 Перенести",            callback_data=f"bstatus:{booking_id}:reschedule")
+    builder.button(text="🗑 Удалить заявку",        callback_data=f"del_booking:{booking_id}")
     builder.adjust(1)
+    return builder.as_markup()
+
+
+def done_booking_actions_kb(booking_id: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🗑 Удалить заявку", callback_data=f"del_booking:{booking_id}")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def confirm_delete_booking_kb(booking_id: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="✅ Да, удалить",   callback_data=f"del_booking_confirm:{booking_id}")
+    builder.button(text="❌ Нет, оставить", callback_data=f"view_booking:{booking_id}")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+# ─── MY BOOKINGS (CLIENT) ──────────────────────────────────────────────────────
+
+def my_bookings_menu_kb() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="📋 Активные",    callback_data="my_bookings:active")
+    builder.button(text="✅ Завершённые", callback_data="my_bookings:done")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def my_booking_item_kb(booking_id: int, can_cancel: bool = True) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    if can_cancel:
+        builder.button(text="❌ Отменить бронирование", callback_data=f"cancel_booking:{booking_id}")
+    builder.button(text="◀️ Назад", callback_data="my_bookings:active")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def my_booking_done_item_kb() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="◀️ Назад", callback_data="my_bookings:done")
+    return builder.as_markup()
+
+
+def confirm_client_cancel_kb(booking_id: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="✅ Да, отменить",  callback_data=f"cancel_booking_yes:{booking_id}")
+    builder.button(text="◀️ Нет, оставить", callback_data=f"my_booking_detail:{booking_id}")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def skip_reason_kb() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="⏩ Пропустить", callback_data="cancel_reason_skip")
     return builder.as_markup()
 
 
@@ -173,24 +230,7 @@ def content_back_to_section_kb(key: str) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def prices_kb() -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.button(text="📝 Записаться", callback_data="go_booking")
-    return builder.as_markup()
-
-
-
-def slot_conflict_kb(max_hours: int = 0) -> InlineKeyboardMarkup:
-    """Buttons shown when chosen time+duration overlaps an existing booking."""
-    builder = InlineKeyboardBuilder()
-    if max_hours > 0:
-        noun = "час" if max_hours == 1 else "часа" if max_hours < 5 else "часов"
-        builder.button(text=f"✅ Взять {max_hours} {noun}", callback_data=f"bhours:{max_hours}")
-    builder.button(text="🕐 Другое время", callback_data="back_to_time")
-    builder.button(text="📅 Другая дата",  callback_data="back_to_date")
-    builder.adjust(1)
-    return builder.as_markup()
-
+# ─── MISC ─────────────────────────────────────────────────────────────────────
 
 def cancel_kb() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
@@ -198,5 +238,25 @@ def cancel_kb() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def remove_kb() -> ReplyKeyboardRemove:
+def remove_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardRemove()
+
+
+def prices_kb() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🏠 Забронировать студию", callback_data="go_booking")
+    return builder.as_markup()
+
+
+def slot_conflict_kb(available_hours: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    if available_hours > 0:
+        noun = "час" if available_hours == 1 else "часа" if available_hours < 5 else "часов"
+        builder.button(
+            text=f"✅ Взять {available_hours} {noun}",
+            callback_data=f"bhours:{available_hours}",
+        )
+    builder.button(text="🕐 Другое время", callback_data="back_to_time")
+    builder.button(text="📅 Другая дата",  callback_data="back_to_date")
+    builder.adjust(1)
+    return builder.as_markup()
