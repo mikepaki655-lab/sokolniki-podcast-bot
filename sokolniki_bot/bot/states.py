@@ -33,3 +33,8 @@ class EditContentFSM(StatesGroup):
 
 class MyBookingsState(StatesGroup):
     cancel_reason = State()
+
+
+class AdminManageState(StatesGroup):
+    add_username    = State()
+    remove_username = State()
