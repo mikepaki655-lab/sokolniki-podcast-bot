@@ -10,7 +10,7 @@ from aiogram.types import (
 from sqlalchemy import select
 
 from bot.keyboards import (
-    cancel_kb, content_type_kb, dates_kb, free_episode_kb, hours_kb,
+    cancel_kb, content_type_kb, dates_kb, hours_kb,
     main_menu, phone_request_kb, prices_kb, remove_kb, times_kb,
 )
 from bot.states import BookingForm
@@ -112,19 +112,6 @@ async def booking_start_cb(callback: CallbackQuery, state: FSMContext) -> None:
     await _start_booking(callback.message, state, lead_type="booking")
 
 
-# ─── FREE EPISODE ─────────────────────────────────────────────────────────────
-
-@router.message(F.text == "🔥 Первый выпуск бесплатно")
-async def show_free_episode(message: Message, state: FSMContext) -> None:
-    await state.clear()
-    await send_section(message, "free", reply_markup=free_episode_kb())
-
-
-@router.callback_query(F.data == "go_free_episode")
-async def start_free_cb(callback: CallbackQuery, state: FSMContext) -> None:
-    await callback.answer()
-    await _start_booking(callback.message, state, lead_type="free_episode")
-
 
 # ─── SHARED BOOKING STEPS ─────────────────────────────────────────────────────
 
@@ -185,10 +172,9 @@ async def booking_hours(callback: CallbackQuery, state: FSMContext) -> None:
     hours = callback.data.split(":", 1)[1]
     await state.update_data(hours=int(hours))
     await state.set_state(BookingForm.phone)
-    # Switch to Reply keyboard for native phone sharing
     await callback.message.answer(
         f"✅ {hours} ч\n\n📱 <b>Укажите ваш номер телефона:</b>\n"
-        "└ Нажмите кнопку ниже или введите вручную",
+        "└ Введите номер в формате <code>+7ХХХХХХХХХХ</code>",
         parse_mode="HTML",
         reply_markup=phone_request_kb(),
         link_preview_options=NO_PREVIEW,
@@ -216,9 +202,10 @@ async def booking_phone_text(message: Message, state: FSMContext) -> None:
     phone = _validate_phone(message.text)
     if not phone:
         await message.answer(
-            "⚠️ Номер не распознан. Введите в формате <b>+7 999 123-45-67</b> "
-            "или нажмите кнопку «📱 Поделиться номером».",
-            parse_mode="HTML")
+            "⚠️ Неверный формат. Введите номер в формате <code>+7ХХХХХХХХХХ</code>",
+            parse_mode="HTML",
+            reply_markup=remove_kb(),
+        )
         return
     await _finish_booking(message, state, phone)
 
@@ -245,11 +232,8 @@ async def _finish_booking(message: Message, state: FSMContext, phone: str) -> No
         "hours":        hours_int,
     })
 
-    icon = "🔥" if lead_type == "free_episode" else "📋"
-    tag  = "Бесплатный выпуск" if lead_type == "free_episode" else "Бронирование"
-
     summary = (
-        f"{icon} <b>Ваша заявка принята!</b>\n\n"
+        "📋 <b>Ваша заявка принята!</b>\n\n"
         f"├ 👤 Имя: <b>{data.get('name')}</b>\n"
         f"├ 📱 Телефон: <b>{phone}</b>\n"
         f"├ 🎬 Контент: <b>{data.get('content_type')}</b>\n"
@@ -263,7 +247,7 @@ async def _finish_booking(message: Message, state: FSMContext, phone: str) -> No
                          reply_markup=main_menu(), link_preview_options=NO_PREVIEW)
 
     admin_text = (
-        f"{'🔥' if lead_type == 'free_episode' else '🆕'} <b>Новая заявка — {tag}</b>\n"
+        f"🆕 <b>Новая заявка — Бронирование</b>\n"
         f"├ 👤 {data.get('name')}\n"
         f"├ 📱 {phone}\n"
         f"├ 🎬 {data.get('content_type')}\n"
